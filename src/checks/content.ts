@@ -201,7 +201,14 @@ const HIDDEN = [
   { re: /[\u202A-\u202E]/, what: "bidirectional override" },
   { re: /[\u2066-\u2069]/, what: "directional isolate" },
   { re: /[\u2060-\u2064]/, what: "invisible operator" },
-  { re: /\uFEFF(?!^)/, what: "byte-order mark mid-file" },
+  // The assertion has to come BEFORE the BOM, not after it. Written as
+  // `\uFEFF(?!^)` the lookahead is evaluated at the position AFTER the
+  // character, where `^` can never match, so the negative always
+  // succeeded and every leading BOM was reported as a hidden character
+  // mid-file. A leading BOM is an encoding marker that Windows editors
+  // add by default — it blocked a Windows-targeted skill on the first
+  // byte of its README.
+  { re: /(?<!^)\uFEFF/, what: "byte-order mark mid-file" },
   { re: /[\u{E0000}-\u{E007F}]/u, what: "Unicode tag character" },
 ] as const;
 
