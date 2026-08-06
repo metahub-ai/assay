@@ -311,3 +311,26 @@ describe("no-assembled-credentials", () => {
     expect(r.status).toBe("pass");
   });
 });
+
+describe("deps-not-typosquatted — length is the discriminator", () => {
+  it("does not accuse `cors`, which is not a squat of `colors`", async () => {
+    // The Express CORS middleware, ~10M downloads a week. Flagging it
+    // blocked the official MCP reference server in a migration dry-run.
+    // `cors`→`colors` is two INSERTIONS into a four-letter word; a
+    // typosquat is a name meant to be misread, which leaves the length
+    // alone or moves it by one.
+    const r = await run(
+      depsNotTyposquatted,
+      ctxFor({ "package.json": '{"dependencies":{"cors":"^2.8.5","express":"^5.2.1"}}' }),
+    );
+    expect(r.status).toBe("pass");
+  });
+
+  it("still catches a same-length transposition", async () => {
+    const r = await run(
+      depsNotTyposquatted,
+      ctxFor({ "package.json": '{"dependencies":{"lodahs":"^4.0.0"}}' }),
+    );
+    expect(r.status).toBe("fail");
+  });
+});

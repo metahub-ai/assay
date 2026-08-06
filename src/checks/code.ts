@@ -620,7 +620,7 @@ function editDistance(a: string, b: string, max = 2): number {
 
 export const depsNotTyposquatted = defineCheck({
   id: "deps-not-typosquatted",
-  version: "1.0.0",
+  version: "1.1.0",
   title: "No dependencies that impersonate popular packages",
   category: "supply-chain",
   axis: "safety",
@@ -673,7 +673,15 @@ export const depsNotTyposquatted = defineCheck({
       for (const p of POPULAR) {
         if (name === p) break;
         const d = editDistance(name, p);
-        if (d <= 2 && Math.abs(name.length - p.length) <= 2 && name.length >= 4) {
+        // Length difference is the discriminator, not edit distance
+        // alone. A typosquat is a name meant to be MISREAD as another:
+        // a transposition (`lodahs`/`lodash`) or a substitution, which
+        // leave the length alone or move it by one. Allowing two
+        // flagged `cors` — the Express middleware, ~10M downloads a
+        // week — as a squat of `colors`, which is two insertions into a
+        // four-letter word, and would have blocked the official MCP
+        // reference server.
+        if (d <= 2 && Math.abs(name.length - p.length) <= 1 && name.length >= 4) {
           hits.push({ name: full, looksLike: p, distance: d });
           break;
         }
