@@ -211,7 +211,21 @@ const bullets = (hits: readonly Hit[]): string =>
 
 // ── 1. dynamic code execution ────────────────────────────────────────
 
-type Lang = "js" | "py" | "sh" | "go" | "rust" | "php" | "ruby";
+type Lang =
+  | "js"
+  | "py"
+  | "sh"
+  | "go"
+  | "rust"
+  | "php"
+  | "ruby"
+  | "jvm"
+  | "dotnet"
+  | "swift"
+  | "c"
+  | "lua"
+  | "perl"
+  | "powershell";
 
 /**
  * Which pattern set applies, or null for a language whose dangerous
@@ -232,6 +246,15 @@ function langOf(path: string): Lang | null {
   if (/\.rs$/i.test(path)) return "rust";
   if (/\.php$/i.test(path)) return "php";
   if (/\.rb$/i.test(path)) return "ruby";
+  // Java and Kotlin share a runtime and therefore share the shapes that
+  // matter here — Runtime.exec, ProcessBuilder, ScriptEngine.
+  if (/\.(java|kt|kts)$/i.test(path)) return "jvm";
+  if (/\.(cs|fs|vb)$/i.test(path)) return "dotnet";
+  if (/\.swift$/i.test(path)) return "swift";
+  if (/\.(c|cc|cpp|h|hpp|m|mm)$/i.test(path)) return "c";
+  if (/\.lua$/i.test(path)) return "lua";
+  if (/\.(pl|pm)$/i.test(path)) return "perl";
+  if (/\.ps1$/i.test(path)) return "powershell";
   return null;
 }
 
@@ -376,6 +399,77 @@ const DYNAMIC_EXEC: Record<Lang, ReadonlyArray<Pattern>> = {
       what: "shell execution",
     },
     { re: /\bbase64_decode\s*\([^)]*\)\s*\)?\s*;?\s*$/m, what: "decoding a payload" },
+  ],
+  // Same argv rule as Go and Rust throughout the block below: a call
+  // that takes a program plus an argument LIST does not involve a
+  // shell, and flagging it would condemn the exact form these checks
+  // ask people to use. Only an explicit shell, or a string handed to an
+  // interpreter, is dangerous.
+  jvm: [
+    {
+      re: /\bRuntime\s*\.\s*getRuntime\s*\(\s*\)\s*\.\s*exec\s*\(\s*(?!new\s+String\s*\[)/,
+      what: "shell execution on a built string",
+    },
+    {
+      re: /\bProcessBuilder\s*\(\s*["'](?:\/bin\/)?(?:ba|z)?sh["']\s*,\s*["']-c["']/,
+      what: "spawning `sh -c`",
+    },
+    { re: /\bScriptEngine\w*\s*\.\s*eval\s*\(/, what: "eval() on a non-literal" },
+    { re: /\bGroovyShell\s*\(\s*\)\s*\.\s*evaluate\s*\(/, what: "eval of a constructed string" },
+  ],
+  dotnet: [
+    {
+      re: /\bProcess\s*\.\s*Start\s*\(\s*["'](?:cmd(?:\.exe)?|powershell(?:\.exe)?|\/bin\/(?:ba)?sh)["']\s*,/i,
+      what: "shell execution",
+    },
+    {
+      re: /\bFileName\s*=\s*["'](?:cmd(?:\.exe)?|powershell(?:\.exe)?)["']/i,
+      what: "shell execution",
+    },
+    { re: /\bCSharpScript\s*\.\s*(?:Evaluate|Run)\w*\s*\(/, what: "eval of a constructed string" },
+  ],
+  swift: [
+    { re: /\blaunchPath\s*=\s*["']\/bin\/(?:ba|z)?sh["']/, what: "spawning `sh -c`" },
+    {
+      re: /\bexecutableURL\s*=\s*URL\([^)]*["']\/bin\/(?:ba|z)?sh["']/,
+      what: "spawning `sh -c`",
+    },
+    { re: /(?<![.\w])system\s*\(\s*(?!["'])/, what: "shell execution on a built string" },
+  ],
+  c: [
+    // system() and popen() hand their argument to /bin/sh, so a
+    // constructed string is a shell injection by construction. A string
+    // literal is left alone — it is visible to review.
+    { re: /(?<![.\w>])system\s*\(\s*(?!["'])/, what: "shell execution on a built string" },
+    { re: /(?<![.\w>])popen\s*\(\s*(?!["'])/, what: "shell execution on a built string" },
+    { re: /\bexecl?p?\s*\(\s*["'](?:\/bin\/)?(?:ba|z)?sh["']\s*,/, what: "spawning `sh -c`" },
+  ],
+  lua: [
+    { re: /\bos\s*\.\s*execute\s*\(\s*(?!["'])/, what: "shell execution on a built string" },
+    { re: /\bio\s*\.\s*popen\s*\(\s*(?!["'])/, what: "shell execution on a built string" },
+    { re: /\b(?:loadstring|load)\s*\(\s*(?!["'])/, what: "eval() on a non-literal" },
+  ],
+  perl: [
+    { re: /(?<![.\w])system\s*\(\s*(?!["'])/, what: "shell execution on a built string" },
+    { re: /`[^`]*\$\{?\w/, what: "backtick execution with interpolation" },
+    { re: /\bopen\s*\([^,]+,\s*["'][^"']*\|\s*["']/, what: "shell execution" },
+    { re: /(?<![.\w])eval\s*(?:\{|\(\s*["']?\$)/, what: "eval() on a non-literal" },
+  ],
+  powershell: [
+    // Invoke-Expression is PowerShell's eval, and `iex` is its alias —
+    // the download-and-run one-liner every dropper on Windows uses.
+    // Ordered before the bare form: first match wins, and a download
+    // piped into iex is the more specific and more serious finding.
+    {
+      re: /\b(?:Invoke-WebRequest|iwr|curl|wget)\b[^\n|]*\|\s*(?:Invoke-Expression|iex)\b/i,
+      what: "piping a download into a shell",
+    },
+    // Labelled as shell execution, NOT as in-process eval. PowerShell's
+    // Invoke-Expression runs arbitrary COMMANDS, so it belongs with
+    // `sh -c` rather than with `new Function` — mislabelling it put the
+    // canonical Windows dropper one-liner in the warn bucket.
+    { re: /\b(?:Invoke-Expression|iex)\b/i, what: "shell execution" },
+    { re: /\bStart-Process\s+["']?(?:cmd|powershell)/i, what: "shell execution" },
   ],
   ruby: [
     { re: /\beval\s*\(\s*(?!["'])/, what: "eval() on a built string" },
