@@ -460,6 +460,48 @@ const BLOCKING_WHAT = new Set([
   "eval of a constructed string",
 ]);
 
+/**
+ * Files under `scripts/` that no lifecycle hook runs.
+ *
+ * A demo recorder and a dependency updater are developer tooling: the
+ * publisher runs them, an installer never does. Blocking an artifact
+ * because its release script shells out punishes maintenance work that
+ * is not part of what anyone installs, and in a 50-artifact sample it
+ * was the single largest category of blocked artifacts.
+ *
+ * Deliberately NOT a blanket exemption for `scripts/`. npm lifecycle
+ * hooks live exactly there, and `postinstall` is one of the most direct
+ * ways to attack whoever installs a package — excluding the directory
+ * wholesale would open a real hole to remove a cosmetic annoyance. So
+ * anything package.json actually references stays fully in scope, and
+ * only the unreferenced remainder is downgraded. Downgraded, not
+ * hidden: these findings are still reported and still cost score.
+ */
+async function unreferencedDevScripts(ctx: CheckContext): Promise<(p: string) => boolean> {
+  const raw = await ctx.source.readFile("package.json");
+  if (!raw) {
+    // No package.json means no lifecycle hooks to respect, but also no
+    // evidence either way. Treating everything as referenced is the
+    // conservative reading and keeps the old behaviour.
+    return () => false;
+  }
+  let referenced = "";
+  try {
+    const pkg = JSON.parse(raw) as { scripts?: Record<string, string> };
+    referenced = Object.values(pkg.scripts ?? {}).join("\n");
+  } catch {
+    return () => false;
+  }
+  return (path) => {
+    if (!/(^|\/)scripts\//.test(path)) return false;
+    // Substring match on the whole scripts block: a hook invoking
+    // `node scripts/build.mjs` mentions the path verbatim, and matching
+    // loosely errs toward keeping a file in scope rather than out.
+    const leaf = path.split("/").pop() ?? path;
+    return !referenced.includes(path) && !referenced.includes(leaf);
+  };
+}
+
 export const noDynamicCodeExecution = defineCheck({
   id: "no-dynamic-code-execution",
   version: "1.0.0",
@@ -526,7 +568,9 @@ export const noDynamicCodeExecution = defineCheck({
     }
     // Split by severity. A shell or an encoded payload blocks; building
     // code at runtime in-process is reported and scored, not delisted.
-    const severe = authored.filter((h) => BLOCKING_WHAT.has(h.what));
+    // Dev tooling no lifecycle hook runs is reported but does not block.
+    const isDevOnly = await unreferencedDevScripts(ctx);
+    const severe = authored.filter((h) => BLOCKING_WHAT.has(h.what) && !isDevOnly(h.path));
     const remediation =
       "Replace dynamic execution with an explicit dispatch table or a parsed data format. If a shell command is genuinely required, pass an argument array rather than a string, and never interpolate untrusted input into it.";
 
