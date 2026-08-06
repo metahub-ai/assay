@@ -37,7 +37,21 @@ function article(kind: string): string {
 /** Where each kind declares its identity. */
 const MANIFEST_PATHS: Record<string, readonly string[]> = {
   skill: ["SKILL.md"],
-  mcp: ["package.json", "pyproject.toml", "mcp.json"],
+  // MCP is a protocol, not a JavaScript convention. GitHub's own
+  // official server is Go; there are Rust and .NET ones. Listing only
+  // the npm and Python manifests meant `manifest-present` — a BLOCKING
+  // check — rejected an entire language ecosystem, and the validation
+  // sweep caught it doing exactly that to github/github-mcp-server.
+  mcp: [
+    "package.json",
+    "pyproject.toml",
+    "mcp.json",
+    // The MCP registry's own manifest, which any language can ship.
+    "server.json",
+    "go.mod",
+    "Cargo.toml",
+    "setup.py",
+  ],
   agent: [...AGENT_MANIFESTS],
   plugin: [...PLUGIN_MANIFESTS],
 };

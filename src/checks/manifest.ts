@@ -43,6 +43,11 @@ export async function readManifest(
 
 function parseManifest(path: string, raw: string): Record<string, unknown> | null {
   if (path.endsWith(".toml")) return parseTomlSurface(raw);
+  // `go.mod` and `setup.py` are not JSON, and returning null for them
+  // would report a perfectly good manifest as MALFORMED — a worse
+  // verdict than the "missing" one that adding them was meant to fix.
+  if (path === "go.mod") return parseGoMod(raw);
+  if (path === "setup.py") return parseSetupPy(raw);
   try {
     const parsed: unknown = JSON.parse(raw);
     return parsed && typeof parsed === "object" && !Array.isArray(parsed)
@@ -238,3 +243,39 @@ export const SEMVER_RE = /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]
 
 /** Lowercase kebab slug, the shape every client convention agrees on. */
 export const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/**
+ * The surface of a `go.mod` that identity cares about.
+ *
+ * `module github.com/github/github-mcp-server` is the package's name,
+ * and the last path segment is what a human calls it. Go has no
+ * version field in go.mod — versions are git tags — so `version` is
+ * legitimately absent rather than missing.
+ */
+function parseGoMod(raw: string): Record<string, unknown> | null {
+  const m = /^\s*module\s+(\S+)/m.exec(raw);
+  if (!m) return null;
+  const modulePath = m[1]!;
+  return {
+    name: modulePath.split("/").pop() ?? modulePath,
+    modulePath,
+    ...(/(^|\n)go\s+\d+\.\d+/.test(raw) ? { language: "go" } : {}),
+  };
+}
+
+/**
+ * The surface of a `setup.py`. Pre-PEP-621 Python packages still ship
+ * one, and reading the two keyword arguments that matter is enough to
+ * establish identity without executing anything — which a setup.py
+ * would otherwise invite, and which is precisely what this tool exists
+ * to warn other people about.
+ */
+function parseSetupPy(raw: string): Record<string, unknown> | null {
+  const name = /\bname\s*=\s*["']([^"']+)["']/.exec(raw);
+  if (!name) return null;
+  const version = /\bversion\s*=\s*["']([^"']+)["']/.exec(raw);
+  return {
+    name: name[1]!,
+    ...(version ? { version: version[1]! } : {}),
+  };
+}
