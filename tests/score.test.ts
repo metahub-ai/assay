@@ -9,6 +9,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { scoreReport } from "../src/score";
+import { DEFAULT_CHECKS } from "../src/checks/index";
 import type { CheckReport, CheckStatus, ScoreAxis } from "../src/types";
 
 const r = (over: Partial<CheckReport> & { status: CheckStatus }): CheckReport => ({
@@ -207,5 +208,72 @@ describe("defensive handling of third-party reports", () => {
   it("reports an axis with no checks as unmeasured, not as zero", () => {
     const s = scoreReport([r({ axis: "safety", status: "pass" })]);
     expect(s.axes.behavior).toEqual({ value: null, coverage: 0, checkIds: [] });
+  });
+});
+
+describe("invariants that make the number trustworthy", () => {
+  const r = (over: Partial<CheckReport>): CheckReport =>
+    ({
+      checkId: "x",
+      axis: "safety",
+      status: "pass",
+      title: "t",
+      message: "m",
+      ...over,
+    }) as CheckReport;
+
+  it("never lets a weight-0 blocking check defeat the safety floor", () => {
+    // Weight 0 means "report it, don't score it". Combined with
+    // `blocking: true` that is a contradiction — the check is the most
+    // consequential kind we have, and also worth nothing. The floor at
+    // line 129 only fires when something was scored, so a weight-0
+    // blocking FAIL would leave safety null and the artifact unflagged.
+    // No such check exists today; this test is what keeps it that way.
+    for (const c of DEFAULT_CHECKS) {
+      if (c.blocking) expect(c.weight ?? 1).toBeGreaterThan(0);
+    }
+  });
+
+  it("cannot be raised by adding checks that could not run", () => {
+    // The tempting bug: score what ran, ignore what didn't. That makes
+    // an artifact we failed to evaluate look identical to one that
+    // passed. Coverage must fall instead.
+    const base = [r({ checkId: "a", status: "pass" })];
+    const withSkips = [
+      ...base,
+      r({ checkId: "b", status: "skip" }),
+      r({ checkId: "c", status: "error" }),
+    ];
+
+    const one = scoreReport(base).axes.safety;
+    const many = scoreReport(withSkips).axes.safety;
+
+    expect(many.value).toBe(one.value); // the value is unchanged...
+    expect(many.coverage).toBeLessThan(one.coverage); // ...but honesty drops
+  });
+
+  it("is deterministic — the same report always yields the same number", () => {
+    // A third party holding the report has to be able to recompute our
+    // number and get ours. Any clock, map-ordering or randomness in
+    // here would make the published score unverifiable.
+    const report = [
+      r({ checkId: "a", status: "pass", axis: "integrity" }),
+      r({ checkId: "b", status: "warn", axis: "care" }),
+      r({ checkId: "c", status: "fail", axis: "safety", blocking: true }),
+    ];
+    const runs = Array.from({ length: 20 }, () => JSON.stringify(scoreReport(report)));
+    expect(new Set(runs).size).toBe(1);
+  });
+
+  it("declines to publish a headline it does not have the coverage for", () => {
+    // One passing check out of a full suite is not a 100. It is "we
+    // don't know", and `undefined` is the only honest way to say that.
+    const thin = [
+      r({ checkId: "a", status: "pass" }),
+      r({ checkId: "b", status: "error" }),
+      r({ checkId: "c", status: "error" }),
+      r({ checkId: "d", status: "error" }),
+    ];
+    expect(scoreReport(thin).overall).toBeUndefined();
   });
 });
