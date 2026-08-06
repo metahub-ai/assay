@@ -18,6 +18,7 @@
 import { defineCheck } from "../check.js";
 import type { CheckContext } from "../check.js";
 import type { CheckResult, Evidence } from "../types.js";
+import { isPlaceholder } from "./content.js";
 import { checkSpecUrl } from "../version.js";
 
 /**
@@ -121,6 +122,53 @@ async function eachFile(
   return scanned;
 }
 
+/**
+ * Line ranges that are test code living inside a production file.
+ *
+ * `skips()` excludes files NAMED like tests, which is enough for
+ * ecosystems that keep tests in separate files. Rust does not: the
+ * convention is an inline `#[cfg(test)] mod tests { … }` at the bottom
+ * of the module it tests, so the test code sits in a file that is
+ * unambiguously production source.
+ *
+ * That gap blocked a published artifact on this line:
+ *
+ *   assert!(!is_loopback_http_url(&parsed("http://192.168.1.2:8080/v1")))
+ *
+ * — a unit test asserting that a private address is correctly REJECTED.
+ * The artifact was flagged for undeclared egress because it tests the
+ * exact hardening the check wants to see. Blaming a publisher for
+ * testing their own defences is the fastest way to teach them the
+ * score is noise.
+ */
+function testScopeOf(path: string, lines: readonly string[]): (i: number) => boolean {
+  if (!/\.rs$/i.test(path)) return () => false;
+
+  const ranges: Array<[number, number]> = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^\s*#\[cfg\(test\)\]/.test(lines[i]!)) continue;
+    // Walk forward tracking braces until the module closes. Counting
+    // braces is crude but the alternative is parsing Rust, and the
+    // failure mode here is only ever "skipped a few extra lines of a
+    // test module" rather than a missed finding in real code.
+    let depth = 0;
+    let opened = false;
+    let j = i + 1;
+    for (; j < lines.length; j++) {
+      for (const ch of lines[j]!) {
+        if (ch === "{") {
+          depth++;
+          opened = true;
+        } else if (ch === "}") depth--;
+      }
+      if (opened && depth <= 0) break;
+    }
+    ranges.push([i, Math.min(j, lines.length - 1)]);
+  }
+  if (ranges.length === 0) return () => false;
+  return (i) => ranges.some(([a, b]) => i >= a && i <= b);
+}
+
 async function scan(
   ctx: CheckContext,
   match: (line: string, path: string, all: string[], i: number) => string | null,
@@ -128,7 +176,12 @@ async function scan(
   const hits: Hit[] = [];
   const scanned = await eachFile(ctx, (path, body, minified) => {
     const lines = body.split("\n");
+    // Computed once per file rather than per line — it walks the whole
+    // file, and doing that 40,000 times over a large source tree is the
+    // difference between a fast check and a slow one.
+    const inTestScope = testScopeOf(path, lines);
     for (let i = 0; i < lines.length; i++) {
+      if (inTestScope(i)) continue;
       const what = match(lines[i]!, path, lines, i);
       if (what) hits.push({ path, line: i + 1, what, ...(minified ? { minified: true } : {}) });
     }
@@ -984,7 +1037,8 @@ export const noAssembledCredentials = defineCheck({
           // Only report what folding REVEALED. A secret sitting in
           // plain sight is `no-hardcoded-credentials`' finding, and
           // reporting it twice makes the report look padded.
-          if (s.re.test(line) && !s.re.test(raw[i] ?? "")) {
+          const m = s.re.exec(line);
+          if (m && !s.re.test(raw[i] ?? "") && !isPlaceholder(m[0])) {
             hits.push({ path, line: i + 1, what: `${s.what}, split across parts` });
             break;
           }

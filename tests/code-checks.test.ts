@@ -20,6 +20,7 @@ import {
   depsNotTyposquatted,
   noAssembledCredentials,
 } from "../src/checks/code";
+import { noHardcodedSecrets } from "../src/checks/content";
 import type { CheckContext, CheckDefinition } from "../src/check";
 import type { CheckResult, Subject } from "../src/types";
 import { MemorySource } from "../src/sources/memory";
@@ -286,7 +287,11 @@ describe("no-assembled-credentials", () => {
   it("folds a key split across two bindings in one declaration", async () => {
     const r = await run(
       noAssembledCredentials,
-      ctxFor({ "a.js": 'const P1 = "AKIA", P2 = "IOSFODNN7EXAMPLE";\nconst K = P1 + P2;' }),
+      // Deliberately not AWS's canonical AKIAIOSFODNN7EXAMPLE: that
+      // string literally is a documented placeholder and is now
+      // suppressed by design. This test is about string folding, so it
+      // needs a value that would really be a credential.
+      ctxFor({ "a.js": 'const P1 = "AKIA", P2 = "2X7QRSTUVWXY9Z1B";\nconst K = P1 + P2;' }),
     );
     expect(r.status).toBe("fail");
     expect(r.detail).toContain("AWS access key id");
@@ -469,6 +474,61 @@ describe("dynamic execution blocks on danger, not on inconvenience", () => {
       ctxFor({
         "gen.py": "exec(a)\nexec(b)\nexec(c)",
         "run.py": "subprocess.run(cmd, shell=True)",
+      }),
+    );
+    expect(r.status).toBe("fail");
+  });
+});
+
+describe("documented placeholders are not credentials", () => {
+  it.each([
+    ["anthropic placeholder", "ANTHROPIC_API_KEY=sk-ant-your-anthropic-key-here"],
+    ["env example", "AWS_KEY=AKIAEXAMPLEEXAMPLE12"],
+    ["angle brackets", "token: ghp_<your-token-goes-here-abcdefghijklmnop>"],
+    ["redacted", "key=sk-ant-redacted-redacted-redacted-xxxx"],
+  ])("does not report %s", async (_n, line) => {
+    // A placeholder has the issuer's exact prefix and the right length
+    // by design, so shape alone cannot separate it from the real thing.
+    // Blocking on one punishes projects for documenting what NOT to
+    // commit — myagents was blocked for a line in its own changelog.
+    const r = await run(noHardcodedSecrets, ctxFor({ "README.md": line }));
+    expect(r.status).not.toBe("fail");
+  });
+
+  it("still blocks a real key sitting in a README", async () => {
+    // The guard tests the matched VALUE, not the file it sits in. A
+    // real credential in documentation is still a real credential.
+    const r = await run(
+      noHardcodedSecrets,
+      ctxFor({ "README.md": "AWS_ACCESS_KEY_ID=AKIA2X7QRSTUVWXY9Z1B" }),
+    );
+    expect(r.status).toBe("fail");
+  });
+});
+
+describe("inline test modules are not production code", () => {
+  it("ignores a finding inside a Rust #[cfg(test)] module", async () => {
+    // Rust keeps tests in the file they test, so skips() — which works
+    // on filenames — never fires. myagents was blocked for a unit test
+    // asserting a private address is correctly REJECTED: it was flagged
+    // for testing the very hardening the check wants.
+    const r = await run(
+      noUndeclaredEgress,
+      ctxFor({
+        "commands.rs":
+          "pub fn go() {}\n\n#[cfg(test)]\nmod tests {\n  #[test]\n  fn t() {\n" +
+          '    assert!(!is_loopback(&parsed("http://192.168.1.2:8080/v1")));\n  }\n}\n',
+      }),
+    );
+    expect(r.status).not.toBe("fail");
+  });
+
+  it("still flags the same call in the production half of the file", async () => {
+    const r = await run(
+      noUndeclaredEgress,
+      ctxFor({
+        "commands.rs":
+          'pub fn go() { let u = "http://192.168.1.2:8080/v1"; }\n\n#[cfg(test)]\nmod tests {}\n',
       }),
     );
     expect(r.status).toBe("fail");

@@ -87,6 +87,21 @@ const evidenceFor = (hits: readonly Hit[]): Evidence[] =>
  * protects nobody. These prefixes are issued by the providers
  * themselves, so a match is a real key or a deliberate imitation.
  */
+
+/**
+ * Whether a credential-shaped match is obviously a documented example.
+ *
+ * See the call site: the shapes are strict enough that a match should
+ * BE the credential, and a placeholder is the one thing that defeats
+ * that while being extremely common — every `.env.example`, README and
+ * changelog carries one.
+ */
+export function isPlaceholder(value: string): boolean {
+  return /your[-_]|[-_]here\b|example|placeholder|changeme|change[-_]me|dummy|xxxx|<[^>]+>|\.\.\.|fake|sample|redacted|\*{4,}/i.test(
+    value,
+  );
+}
+
 const SECRET_PATTERNS: ReadonlyArray<{ re: RegExp; what: string }> = [
   { re: /\bAKIA[0-9A-Z]{16}\b/, what: "AWS access key id" },
   { re: /\bASIA[0-9A-Z]{16}\b/, what: "AWS temporary access key id" },
@@ -130,7 +145,17 @@ export const noHardcodedSecrets = defineCheck({
     const { hits, scanned } = await scanFiles(ctx, (line, path) => {
       if (EXAMPLE_FILE.test(path)) return null;
       if (PLACEHOLDER.test(line)) return null;
-      for (const p of SECRET_PATTERNS) if (p.re.test(line)) return p.what;
+      for (const p of SECRET_PATTERNS) {
+        const m = p.re.exec(line);
+        // A documented placeholder has the issuer's exact prefix and
+        // the right length by design, so the shape alone cannot tell
+        // them apart. Blocking on one punishes the projects that
+        // document what NOT to commit — a published artifact was
+        // blocked for `sk-ant-your-anthropic-key-here` in its own
+        // changelog. A real key in a README still blocks; this tests
+        // the matched value, not the file it sits in.
+        if (m && !isPlaceholder(m[0])) return p.what;
+      }
       return null;
     });
 
