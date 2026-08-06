@@ -534,3 +534,42 @@ describe("inline test modules are not production code", () => {
     expect(r.status).toBe("fail");
   });
 });
+
+describe("developer tooling no lifecycle hook runs", () => {
+  const shell = 'const { execSync } = require("child_process");\nexecSync(cmd + arg);';
+
+  it("does not block on a script package.json never references", async () => {
+    // A demo recorder or release script is run by the publisher, never
+    // by an installer. Still reported and still costs score.
+    const r = await run(
+      noDynamicCodeExecution,
+      ctxFor({
+        "package.json": '{"name":"x","scripts":{"build":"tsc"}}',
+        "scripts/record_demo.mjs": shell,
+      }),
+    );
+    expect(r.status).toBe("warn");
+  });
+
+  it("still blocks when a lifecycle hook DOES reference it", async () => {
+    // postinstall in scripts/ is one of the most direct ways to attack
+    // whoever installs a package, so a blanket scripts/ exemption would
+    // open a real hole. deepchat blocks for exactly this reason: its
+    // update-shadcn script is wired into package.json.
+    const r = await run(
+      noDynamicCodeExecution,
+      ctxFor({
+        "package.json": '{"name":"x","scripts":{"postinstall":"node scripts/setup.mjs"}}',
+        "scripts/setup.mjs": shell,
+      }),
+    );
+    expect(r.status).toBe("fail");
+  });
+
+  it("keeps everything in scope when there is no package.json to consult", async () => {
+    // No manifest is no evidence either way, and the conservative
+    // reading preserves the previous behaviour.
+    const r = await run(noDynamicCodeExecution, ctxFor({ "scripts/x.mjs": shell }));
+    expect(r.status).toBe("fail");
+  });
+});
