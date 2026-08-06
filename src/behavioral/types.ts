@@ -109,6 +109,14 @@ export interface BehavioralEvalResult {
    * one. Absent for kinds whose surface is not enumerable at runtime.
    */
   observedSurface?: import("../surface.js").ToolSurface;
+  /**
+   * Tokens the run consumed, split by role.
+   *
+   * Present on failed runs too — a run that died halfway still spent
+   * money on the calls it made, and omitting that would understate a
+   * catalog-wide projection by exactly the failures.
+   */
+  usage?: import("../metering.js").UsageReport;
   generatedAt: string;
   /**
    * Set when the run couldn't complete (provider failure, sandbox

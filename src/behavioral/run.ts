@@ -27,6 +27,7 @@ import {
   type SandboxProvider,
   type SandboxSpec,
 } from "../ports.js";
+import { meterLlm } from "../metering.js";
 import { judgeTranscript, type JudgeConfig } from "./judge.js";
 import { scoreResults, DEFAULT_PASS_RATIO } from "./score.js";
 import { loadTestCases } from "./test-cases.js";
@@ -267,7 +268,14 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-export async function runBehavioralEval(input: RunBehavioralInput): Promise<BehavioralEvalResult> {
+export async function runBehavioralEval(raw: RunBehavioralInput): Promise<BehavioralEvalResult> {
+  // Metering wraps the provider once, here, so every LLM call the run
+  // makes is counted no matter which harness makes it. Doing it at the
+  // adapters instead would mean a newly-added adapter is silently
+  // unmetered, and a run that reports no cost is indistinguishable from
+  // one that was free.
+  const metered = meterLlm(raw.llm);
+  const input: RunBehavioralInput = { ...raw, llm: metered };
   const providers = { sandbox: input.sandboxProvider.name, llm: input.llm.name };
   let sandbox: Sandbox | null = null;
   try {
@@ -398,17 +406,25 @@ export async function runBehavioralEval(input: RunBehavioralInput): Promise<Beha
       adversarial: score.adversarial,
       confidence: score.confidence,
       ...(observedSurface ? { observedSurface } : {}),
+      usage: metered.usage(),
       generatedAt: new Date().toISOString(),
     };
   } catch (err) {
     // The distinction that matters: our sandbox dying is not evidence
     // about the artifact, and the caller must not record it as one.
-    return failedResult(
-      input,
-      providers,
-      `Behavioral eval failed: ${(err as Error).message}`,
-      isSandboxInfraError(err),
-    );
+    // A run that died halfway still spent money on the calls it made,
+    // and dropping that usage would understate the catalog's true cost
+    // by exactly the failures — the runs an operator most wants to
+    // account for.
+    return {
+      ...failedResult(
+        input,
+        providers,
+        `Behavioral eval failed: ${(err as Error).message}`,
+        isSandboxInfraError(err),
+      ),
+      usage: metered.usage(),
+    };
   } finally {
     // Best-effort teardown — never let a close error mask the result.
     if (sandbox) await sandbox.close().catch(() => undefined);

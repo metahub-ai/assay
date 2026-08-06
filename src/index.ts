@@ -102,3 +102,12 @@ export type { KeyPair, VerificationResult, VerificationFinding, VerifyOptions } 
 export { FileTranscriptSink, loadTranscript, replayTranscript } from "./transcripts.js";
 export type { StoredTranscript, ReplayOutcome } from "./transcripts.js";
 export type { TranscriptContext } from "./checks/behavioral.js";
+
+export { meterLlm, estimateCost } from "./metering.js";
+export type {
+  UsageReport,
+  RoleUsage,
+  PriceTable,
+  CostEstimate,
+  MeteredProvider,
+} from "./metering.js";
