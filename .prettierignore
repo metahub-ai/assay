@@ -1,0 +1,8 @@
+dist/
+coverage/
+node_modules/
+
+# Generated from the check registry by `npm run docs:checks`.
+# Prettier would reformat it, the generator would rewrite it, and CI
+# would fail on whichever ran second.
+docs/CHECKS.md

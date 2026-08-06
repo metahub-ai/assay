@@ -1,0 +1,144 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      # Runs in CI now. `lint` was declared in package.json, had no
+      # eslint dependency and no config, and was never invoked here —
+      # so `npm run lint` failed with "command not found" and the rules
+      # CONTRIBUTING describes enforced nothing.
+      - run: npm run lint
+      - run: npm run format:check
+      # Every check publishes a `spec` URL into docs/CHECKS.md, and
+      # SARIF republishes it as `helpUri`. A check added without its
+      # documentation ships a link to an anchor that does not exist.
+      - run: npm run docs:check
+      - run: npm test
+      - name: Coverage
+        if: matrix.node == 20
+        run: npm run test:coverage
+
+  build:
+    name: build + smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      # The CLI is the promise this project makes to publishers, so CI
+      # exercises it against a real artifact rather than trusting that
+      # the unit tests imply it works end to end.
+      # A genuinely clean skill: the catalog requires a description that
+      # says WHEN to use it, a declared tool scope, and a substantive body.
+      - name: Smoke — a clean artifact exits 0
+        run: |
+          mkdir -p /tmp/clean
+          {
+            echo '---'
+            echo 'name: ok'
+            echo 'description: Use when the user wants tidy markdown tables from raw text'
+            echo 'allowed-tools: []'
+            echo '---'
+            echo '# OK'
+            node -e "process.stdout.write('word '.repeat(80))"
+          } > /tmp/clean/SKILL.md
+          printf 'MIT' > /tmp/clean/LICENSE
+          node dist/cli.js run /tmp/clean
+
+      # The commands a CI user actually reaches for.
+      - name: Smoke — list, explain, sarif, diff
+        run: |
+          node dist/cli.js list > /dev/null
+          node dist/cli.js explain no-install-scripts > /dev/null
+          node dist/cli.js run /tmp/clean --sarif | node -e "
+            let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
+              const j=JSON.parse(s);
+              if(j.version!=='2.1.0') throw new Error('bad SARIF version');
+            });"
+          node dist/cli.js run /tmp/clean --json > /tmp/a.json
+          node dist/cli.js diff /tmp/a.json /tmp/a.json
+
+      # `replay` needs a model, so CI stands up an OpenAI-compatible
+      # endpoint rather than skipping the command entirely. The point is
+      # to exercise provider resolution and the adapter wire format.
+      # Live advisory lookup. Uses a package with known, long-published
+      # advisories so the assertion is stable.
+      - name: Smoke — OSV finds real advisories
+        run: |
+          mkdir -p /tmp/vuln
+          printf '{"name":"v","version":"1.0.0","description":"demo","bin":{"v":"./i.js"},"dependencies":{"lodash":"4.17.20"}}' > /tmp/vuln/package.json
+          touch /tmp/vuln/i.js
+          printf 'MIT' > /tmp/vuln/LICENSE
+          node dist/cli.js run /tmp/vuln --kind mcp --net --json > /tmp/vuln.json || true
+          node -e "
+            const r = require('/tmp/vuln.json');
+            const c = r.results.find(x => x.checkId === 'deps-no-known-vulns');
+            if (c.status !== 'fail') {
+              console.error('::error::expected a failing advisory check, got ' + c.status);
+              process.exit(1);
+            }
+            if (!/GHSA/.test(JSON.stringify(c.evidence))) {
+              console.error('::error::expected GHSA evidence links');
+              process.exit(1);
+            }
+            console.log('OSV: ' + c.summary);
+          "
+
+      - name: Smoke — replay resolves a provider and reports honestly
+        run: |
+          cat > /tmp/judge.mjs <<'JS'
+          import { createServer } from "node:http";
+          createServer((req, res) => {
+            let b = ""; req.on("data", d => b += d).on("end", () => {
+              res.writeHead(200, { "content-type": "application/json" });
+              res.end(JSON.stringify({ choices: [{ message: { content: "{\"pass\":true,\"scores\":{\"correctness\":9,\"instruction_adherence\":9,\"safety\":10,\"latency\":9},\"rationale\":\"ok\",\"safetyFlags\":[]}" }, finish_reason: "stop" }] }));
+            });
+          }).listen(8931);
+          JS
+          node /tmp/judge.mjs & sleep 1
+          # A report with no transcripts must say so and exit 2, not
+          # pretend everything reproduced.
+          if LOCAL_LLM_BASE_URL=http://localhost:8931/v1 \
+             node dist/cli.js replay /tmp/a.json --transcripts /tmp/none --provider local; then
+            echo "::error::replay should exit non-zero when there is nothing to replay"
+            exit 1
+          fi
+      - name: Smoke — a leaked credential exits 1
+        run: |
+          mkdir -p /tmp/leaky
+          printf -- '---\nname: leak\n---\n# Leak\n' > /tmp/leaky/SKILL.md
+          printf 'TOKEN=abc' > /tmp/leaky/.env
+          if node dist/cli.js run /tmp/leaky; then
+            echo "::error::expected a non-zero exit for a leaked credential"
+            exit 1
+          fi

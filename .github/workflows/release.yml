@@ -1,0 +1,104 @@
+# Build a self-contained tarball and publish it to GitHub Releases.
+#
+# This is the whole distribution mechanism. There is no package
+# registry and no domain in the path — `install.sh` pulls the asset
+# straight from the release, checks it against `checksums.txt` published
+# beside it, and unpacks it.
+#
+# It works because the tool has no runtime dependencies. `e2b`, `openai`
+# and `sigstore` are optional peers, imported lazily, and only needed for
+# the E2B sandbox, the OpenAI adapter, and keyless signing respectively.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+  # Lets the release sign itself with the same keyless flow the tool
+  # offers its users. Dogfooding the claim.
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # The gate. A release that does not pass its own suite has no
+      # business being installed by a one-line curl.
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+      - name: Resolve the tag
+        id: tag
+        run: echo "value=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      # A build that misreports its own version stamps a false
+      # provenance into every report it produces. v0.1.1 shipped saying
+      # it was 0.1.0.
+      - name: The tag, package.json and ASSAY_VERSION must agree
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.value }}"
+          WANT="${TAG#v}"
+          PKG=$(node -p "require('./package.json').version")
+          SRC=$(node -p "require('./dist/version.js').ASSAY_VERSION")
+          echo "tag=$WANT package.json=$PKG ASSAY_VERSION=$SRC"
+          [ "$PKG" = "$WANT" ] || { echo "package.json version $PKG != tag $WANT"; exit 1; }
+          [ "$SRC" = "$WANT" ] || { echo "ASSAY_VERSION $SRC != tag $WANT"; exit 1; }
+
+      - name: Assemble the tarball
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.value }}"
+          STAGE="assay-$TAG"
+          mkdir -p "$STAGE"
+          # Exactly what is needed to run, and nothing else: no tests,
+          # no sources, no node_modules.
+          cp -R dist "$STAGE/"
+          cp package.json README.md LICENSE "$STAGE/"
+          tar -czf "assay-$TAG.tar.gz" "$STAGE"
+          sha256sum "assay-$TAG.tar.gz" > checksums.txt
+          cat checksums.txt
+
+      # Prove the archive actually runs before publishing it, from a
+      # clean directory with no repo around it.
+      - name: Smoke-test the tarball
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.value }}"
+          mkdir -p /tmp/verify && tar -xzf "assay-$TAG.tar.gz" -C /tmp/verify --strip-components=1
+          node /tmp/verify/dist/cli.js --version
+          node /tmp/verify/dist/cli.js list > /dev/null
+          mkdir -p /tmp/subject
+          printf -- '---\nname: smoke\ndescription: Use when verifying that a release archive runs correctly\nallowed-tools: []\n---\n# Smoke\n' > /tmp/subject/SKILL.md
+          node /tmp/verify/dist/cli.js run /tmp/subject --json > /dev/null
+          echo "archive runs standalone"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.value }}"
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            "assay-$TAG.tar.gz" \
+            checksums.txt || \
+          gh release upload "$TAG" "assay-$TAG.tar.gz" checksums.txt --clobber
