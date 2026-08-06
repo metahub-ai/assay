@@ -226,6 +226,15 @@ interface Pattern {
 
 const DYNAMIC_EXEC: Record<Lang, ReadonlyArray<Pattern>> = {
   js: [
+    // Ordered before the generic eval rule: first match wins, and this
+    // one is categorically worse. Evaluating a DECODED blob means the
+    // payload is unreadable in the source at all, which is the shape
+    // every dropper has. It must block even though plain
+    // eval-on-a-variable is only a warning.
+    {
+      re: /\beval\s*\([^)]*(?:atob|Buffer\s*\.\s*from|fromCharCode|base64|unescape|decodeURI)/i,
+      what: "eval of a constructed string",
+    },
     { re: /\beval\s*\(\s*(?!["'`][^"'`]*["'`]\s*\))/, what: "eval() on a non-literal" },
     { re: /\bnew\s+Function\s*\(/, what: "new Function() — compiles a string into code" },
     {
@@ -240,6 +249,24 @@ const DYNAMIC_EXEC: Record<Lang, ReadonlyArray<Pattern>> = {
     // imports child_process. See CHILD_PROCESS below.
     {
       re: /(?<![.\w$])(exec|execSync)\s*\(\s*(?!["'`])/,
+      what: "child_process exec on a built string",
+      needsChildProcess: true,
+    },
+    // The rule above skips anything starting with a quote, so that a
+    // fully-literal command is left alone. That also let the classic
+    // injection through: exec("ls " + dir) starts with a quote but is
+    // assembled from a variable, and it is the exact shape this check
+    // exists to catch. Matched separately rather than by loosening the
+    // rule above, which would re-flag the literal commands it was
+    // narrowed to permit.
+    {
+      re: /(?<![.\w$])(exec|execSync)\s*\(\s*["'`][^"'`]*["'`]\s*(?:\+|,\s*\w+\s*\+)/,
+      what: "child_process exec on a built string",
+      needsChildProcess: true,
+    },
+    // Template literals interpolate directly into the command string.
+    {
+      re: /(?<![.\w$])(exec|execSync)\s*\(\s*`[^`]*\$\{/,
       what: "child_process exec on a built string",
       needsChildProcess: true,
     },
@@ -337,6 +364,49 @@ function inStringLiteral(line: string, index: number): boolean {
   return single || double || backtick;
 }
 
+/**
+ * Findings severe enough to justify removing an artifact from a public
+ * registry, as opposed to flagging it.
+ *
+ * The distinction this draws is between "what runs is not what is
+ * written" and "a shell or an opaque payload is involved".
+ *
+ * Running the check across 50 published artifacts made the case: seven
+ * were blocked on `no-dynamic-code-execution`, and the ones I read were
+ * genuine findings about legitimate code — lastmile-ai/mcp-agent builds
+ * pydantic models with `exec(func_code, namespace)` in a type
+ * serializer. That is real dynamic execution and worth surfacing, but
+ * delisting a widely-used framework for a codegen idiom is a false
+ * accusation dressed as a safety verdict, and it would have taught
+ * publishers that the score is noise.
+ *
+ * What stays blocking is the set where an installer is plausibly
+ * harmed: a shell (which turns a string into arbitrary commands), a
+ * download piped into one, or code recovered from an encoded blob
+ * (where the payload is deliberately unreadable). Everything else is a
+ * warning that still costs score and still names the file and line.
+ */
+const BLOCKING_WHAT = new Set([
+  // A shell turns a constructed string into arbitrary commands.
+  "shell execution",
+  "shell execution on a built string",
+  "shell pipeline into sh",
+  "spawning `sh -c`",
+  "spawning a shell via Command::new",
+  "spawning a shell via exec.Command",
+  "subprocess with shell=True",
+  "os.system()",
+  "backtick execution with interpolation",
+  "child_process exec on a built string",
+  // Remote code fetched and executed in one step.
+  "piping a download into a shell",
+  "piping a downloaded script straight into a shell",
+  "process substitution running a download",
+  // The payload is encoded, so the source cannot be reviewed at all.
+  "decoding a payload",
+  "eval of a constructed string",
+]);
+
 export const noDynamicCodeExecution = defineCheck({
   id: "no-dynamic-code-execution",
   version: "1.0.0",
@@ -401,15 +471,35 @@ export const noDynamicCodeExecution = defineCheck({
         evidence: evidenceFor(bundled),
       };
     }
+    // Split by severity. A shell or an encoded payload blocks; building
+    // code at runtime in-process is reported and scored, not delisted.
+    const severe = authored.filter((h) => BLOCKING_WHAT.has(h.what));
+    const remediation =
+      "Replace dynamic execution with an explicit dispatch table or a parsed data format. If a shell command is genuinely required, pass an argument array rather than a string, and never interpolate untrusted input into it.";
+
+    if (severe.length === 0) {
+      return {
+        status: "warn",
+        summary: `${authored.length} construct${authored.length === 1 ? " that builds" : "s that build"} code at runtime.`,
+        detail:
+          `${bullets(authored)}\n\n` +
+          "What runs is not what is written here, so reviewing the source does not tell you what the artifact does. No shell and no encoded payload is involved, so this is reported rather than blocked — it is a review burden, not a demonstrated danger.",
+        remediation,
+        evidence: evidenceFor(authored),
+      };
+    }
+
     return {
       status: "fail",
-      summary: `${authored.length} construct${authored.length === 1 ? " that builds" : "s that build"} code at runtime.`,
+      summary: `${severe.length} construct${severe.length === 1 ? "" : "s"} that can run arbitrary commands.`,
       detail:
-        `${bullets(authored)}\n\n` +
-        "What runs is not what is written here, so reviewing the source does not tell you what the artifact does.",
-      remediation:
-        "Replace dynamic execution with an explicit dispatch table or a parsed data format. If a shell command is genuinely required, pass an argument array rather than a string, and never interpolate untrusted input into it.",
-      evidence: evidenceFor(authored),
+        `${bullets(severe)}\n\n` +
+        "A shell or an encoded payload is involved, so what executes is both unreadable here and unbounded at runtime." +
+        (authored.length > severe.length
+          ? ` ${authored.length - severe.length} further runtime-code construct${authored.length - severe.length === 1 ? " was" : "s were"} found but did not involve a shell.`
+          : ""),
+      remediation,
+      evidence: evidenceFor(severe),
     };
   },
 });

