@@ -1,0 +1,10 @@
+{
+  // Lint sees more than the build does: tests and config files are code
+  // too, and typed lint rules need a project that contains them.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true
+  },
+  "include": ["src/**/*", "tests/**/*", "*.ts"]
+}

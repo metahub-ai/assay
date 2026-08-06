@@ -1,0 +1,92 @@
+{
+  "name": "@metahub-ai/assay",
+  "version": "0.1.1",
+  "description": "Evaluate AI artifacts — skills, MCP servers, agents and plugins — and produce a scored, signable, reproducible report.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/metahub-ai/assay.git"
+  },
+  "bugs": {
+    "url": "https://github.com/metahub-ai/assay/issues"
+  },
+  "homepage": "https://github.com/metahub-ai/assay#readme",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "assay": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./cli": {
+      "types": "./dist/cli.d.ts",
+      "import": "./dist/cli.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "install.sh"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint .",
+    "format": "prettier --write \"**/*.{ts,json,md,yml}\"",
+    "format:check": "prettier --check \"**/*.{ts,json,md,yml}\"",
+    "clean": "rm -rf dist coverage",
+    "prepublishOnly": "npm run build",
+    "docs:checks": "npm run build && node scripts/gen-checks-doc.mjs",
+    "docs:check": "npm run build && node scripts/gen-checks-doc.mjs --check"
+  },
+  "keywords": [
+    "mcp",
+    "claude",
+    "agent",
+    "skill",
+    "plugin",
+    "eval",
+    "evaluation",
+    "security",
+    "supply-chain",
+    "sbom",
+    "sigstore",
+    "ai"
+  ],
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@vitest/coverage-v8": "^4.1.9",
+    "e2b": "^2.37.0",
+    "eslint": "^9.39.5",
+    "prettier": "^3.4.2",
+    "sigstore": "^5.0.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.65.0",
+    "vitest": "^4.1.9"
+  },
+  "peerDependencies": {
+    "e2b": "^2.27.1",
+    "sigstore": "^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "e2b": {
+      "optional": true
+    },
+    "sigstore": {
+      "optional": true
+    }
+  }
+}

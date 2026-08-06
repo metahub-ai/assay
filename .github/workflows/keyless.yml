@@ -1,0 +1,106 @@
+name: Keyless signing
+
+# Sigstore keyless signing cannot be exercised locally — it needs an
+# OIDC identity. This job is where that path is actually tested, on
+# real Fulcio and real Rekor, rather than asserted in a unit test
+# against a mock that would only prove our mock matches our mock.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # The ambient identity Fulcio binds the ephemeral key to.
+  id-token: write
+
+jobs:
+  sign-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+      - name: Produce a report
+        run: |
+          mkdir -p /tmp/artifact
+          {
+            echo '---'
+            echo 'name: signed-demo'
+            echo 'description: Use when demonstrating that a report can be signed keylessly'
+            echo 'allowed-tools: []'
+            echo '---'
+            echo '# Signed demo'
+            # Unique per run. Rekor is content-addressed and
+            # deduplicates, so a byte-identical report returns 409
+            # "an equivalent entry already exists" — which is Rekor
+            # working correctly and this job failing for no reason.
+            # A job that exists to prove real signing works has to
+            # sign something that has not been signed before.
+            echo "Run ${GITHUB_RUN_ID:-local} at commit ${GITHUB_SHA:-none}."
+            node -e "process.stdout.write('word '.repeat(80))"
+          } > /tmp/artifact/SKILL.md
+          printf 'MIT' > /tmp/artifact/LICENSE
+          node dist/cli.js run /tmp/artifact --json > /tmp/report.json
+
+      - name: Sign keylessly against real Fulcio and Rekor
+        id: sign
+        run: |
+          # Exit 3 is the duplicate-entry outcome, and it is NOT a
+          # failure of ours. Rekor deduplicates by content; the payload
+          # here is unique per run (it carries the run id), so a 409
+          # means the sigstore client's own retry raced an upload that
+          # had already landed. The entry is in the transparency log
+          # either way — what we lose is the bundle the client would
+          # have returned, so the verification steps below cannot run.
+          set +e
+          node dist/cli.js sign /tmp/report.json --keyless
+          code=$?
+          set -e
+          if [ "$code" -eq 3 ]; then
+            echo "::warning::Rekor returned a duplicate entry — the report is logged, but no bundle came back, so verification is skipped this run."
+            echo "duplicate=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          exit "$code"
+
+      - name: Verify the bundle, bound to this workflow's identity
+        if: steps.sign.outputs.duplicate != 'true'
+        run: |
+          node dist/cli.js verify /tmp/report.json \
+            --bundle /tmp/report.sigstore.json \
+            --issuer https://token.actions.githubusercontent.com \
+            --identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/keyless.yml@${GITHUB_REF}"
+
+      - name: A bundle signed by someone else must NOT verify
+        run: |
+          # Binding to an identity is the whole point — "valid signature
+          # by somebody" is not a security property.
+          if node dist/cli.js verify /tmp/report.json \
+               --bundle /tmp/report.sigstore.json \
+               --issuer https://token.actions.githubusercontent.com \
+               --identity "https://github.com/someone-else/repo/.github/workflows/x.yml@refs/heads/main"; then
+            echo "::error::verification accepted an identity it should have rejected"
+            exit 1
+          fi
+
+      - name: A tampered report must NOT verify
+        if: steps.sign.outputs.duplicate != 'true'
+        run: |
+          node -e "
+            const fs=require('fs');
+            const r=JSON.parse(fs.readFileSync('/tmp/report.json','utf8'));
+            r.score.overall=100;
+            fs.writeFileSync('/tmp/tampered.json',JSON.stringify(r,null,2));
+          "
+          if node dist/cli.js verify /tmp/tampered.json \
+               --bundle /tmp/report.sigstore.json \
+               --issuer https://token.actions.githubusercontent.com; then
+            echo "::error::verification accepted a tampered report"
+            exit 1
+          fi
