@@ -238,7 +238,7 @@ Typosquatting is the cheapest supply-chain attack there is: register a name one 
 ✘  "dependencies": { "lodahs": "^4.0.0" }
 ```
 
-<sub>axis `safety` · weight 4 · **blocking** · `deterministic` · applies to all kinds · v1.0.0</sub>
+<sub>axis `safety` · weight 4 · **blocking** · `deterministic` · applies to all kinds · v1.1.0</sub>
 
 ### license-present
 
