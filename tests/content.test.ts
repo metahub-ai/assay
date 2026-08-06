@@ -139,6 +139,23 @@ describe("no-hidden-unicode", () => {
 
   const check = byId("no-hidden-unicode");
 
+  it("does not report a byte-order mark at the start of a file", async () => {
+    // The assertion used to sit AFTER the character (`\uFEFF(?!^)`),
+    // where `^` can never match, so the negative always succeeded and
+    // every leading BOM read as a hidden character mid-file. Windows
+    // editors add one by default, and it blocked a Windows-targeted
+    // skill on the first byte of its README.
+    const r = await run(check, { "README.md": "\uFEFF# Title\n\nBody\n" });
+    expect(r.status).not.toBe("fail");
+  });
+
+  it("still reports a byte-order mark in the middle of a file", async () => {
+    // Mid-file it is not an encoding marker but a zero-width character
+    // sitting inside content, which is the actual concern.
+    const r = await run(check, { "README.md": "# Title\n\nso\uFEFFme\n" });
+    expect(r.status).toBe("fail");
+  });
+
   it.each([
     ["zero-width space", "​"],
     ["zero-width non-joiner", "‌"],
