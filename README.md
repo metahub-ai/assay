@@ -104,7 +104,7 @@ peers, imported lazily and only if you use the E2B sandbox or keyless signing.
 npx github:metahub-ai/assay run .
 
 # a specific release
-curl -fsSL .../install.sh | sh -s -- --version=v0.1.1
+curl -fsSL .../install.sh | sh -s -- --version=v0.1.2
 
 # from source
 git clone https://github.com/metahub-ai/assay.git
