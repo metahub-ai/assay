@@ -1,7 +1,7 @@
 {
   "name": "@metahub-ai/assay",
   "version": "0.1.1",
-  "description": "Evaluate AI artifacts — skills, MCP servers, agents and plugins — and produce a scored, signable, reproducible report.",
+  "description": "Evaluate AI artifacts \u2014 skills, MCP servers, agents and plugins \u2014 and produce a scored, signable, reproducible report.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -20,12 +20,15 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./cli": {
       "types": "./dist/cli.d.ts",
-      "import": "./dist/cli.js"
-    }
+      "import": "./dist/cli.js",
+      "default": "./dist/cli.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
