@@ -16,6 +16,7 @@ import {
   documentationPresent,
   recentlyMaintained,
 } from "../src/checks/core";
+import { manifestPresent, readIdentity } from "../src/checks/integrity";
 import type { CheckContext, CheckDefinition } from "../src/check";
 import { createBehavioralCheck } from "../src/checks/behavioral";
 import { SandboxInfraError, type SandboxRunner } from "../src/ports";
@@ -502,5 +503,60 @@ describe("MemorySource", () => {
   it("orders the tree deterministically", async () => {
     const a = await new MemorySource({ "z.txt": "1", "a.txt": "2" }).listTree();
     expect(a.map((e) => e.path)).toEqual(["a.txt", "z.txt"]);
+  });
+});
+
+describe("MCP is a protocol, not a JavaScript convention", () => {
+  it("accepts a Go server's go.mod as a manifest", async () => {
+    // github/github-mcp-server is Go. Listing only npm and Python
+    // manifests made `manifest-present` — a BLOCKING check — reject an
+    // entire language ecosystem, including GitHub's own server.
+    const r = await run(
+      manifestPresent,
+      ctxFor(
+        { "go.mod": "module github.com/github/github-mcp-server\n\ngo 1.23\n" },
+        {},
+        { subject: { ...subject, kind: "mcp" } },
+      ),
+    );
+    expect(r.status).toBe("pass");
+  });
+
+  it("reads the module name as the artifact's name", async () => {
+    const r = await readIdentity(
+      ctxFor(
+        { "go.mod": "module github.com/github/github-mcp-server\n\ngo 1.23\n" },
+        {},
+        { subject: { ...subject, kind: "mcp" } },
+      ),
+    );
+    expect(r.name).toBe("github-mcp-server");
+    expect(r.malformed).toBe(false);
+  });
+
+  it("does not report a Rust server as malformed", async () => {
+    const r = await run(
+      manifestPresent,
+      ctxFor(
+        { "Cargo.toml": '[package]\nname = "mcp-server"\nversion = "0.1.0"\n' },
+        {},
+        { subject: { ...subject, kind: "mcp" } },
+      ),
+    );
+    expect(r.status).toBe("pass");
+  });
+
+  it("reads setup.py without executing it", async () => {
+    // A setup.py invites execution to learn its metadata, which is
+    // exactly the behaviour this tool warns other people about.
+    const r = await readIdentity(
+      ctxFor(
+        { "setup.py": 'setup(\n  name="mcp-thing",\n  version="2.1.0",\n)\n' },
+        {},
+        { subject: { ...subject, kind: "mcp" } },
+      ),
+    );
+    expect(r.name).toBe("mcp-thing");
+    expect(r.version).toBe("2.1.0");
   });
 });

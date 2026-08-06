@@ -20,8 +20,24 @@ import type { CheckContext } from "../check.js";
 import type { CheckResult, Evidence } from "../types.js";
 import { checkSpecUrl } from "../version.js";
 
-/** Source files worth parsing. */
-const CODE = /\.(m?[jt]sx?|py|rb|sh|bash|zsh)$/i;
+/**
+ * Source files worth parsing.
+ *
+ * Deliberately broad. This used to be JS, Python, Ruby and shell, which
+ * meant the entire code-safety suite was blind to everything else — a
+ * Go MCP server shelling out to `curl … | bash` scored safety 92.9 and
+ * was not blocked. MCP is a protocol and skills are prose; neither
+ * implies an ecosystem, and GitHub's own MCP server is Go.
+ *
+ * Three of the four code checks — egress, assembled credentials,
+ * obfuscated payloads — are language-agnostic: they look for URLs,
+ * concatenated literals and encoded blobs, which look the same in any
+ * syntax. Widening the file filter gives those checks coverage
+ * everywhere immediately. Only dynamic execution needs per-language
+ * patterns, and a language without them simply does not run that one.
+ */
+const CODE =
+  /\.(m?[jt]sx?|py|rb|sh|bash|zsh|go|rs|java|kt|cs|php|swift|c|cc|cpp|h|hpp|lua|pl|ps1)$/i;
 
 /** Never code we are grading. */
 const SKIP = /(^|\/)(node_modules|\.git|vendor|__pycache__)\//;
@@ -142,12 +158,27 @@ const bullets = (hits: readonly Hit[]): string =>
 
 // ── 1. dynamic code execution ────────────────────────────────────────
 
-type Lang = "js" | "py" | "sh";
+type Lang = "js" | "py" | "sh" | "go" | "rust" | "php" | "ruby";
 
+/**
+ * Which pattern set applies, or null for a language whose dangerous
+ * shapes are not yet described.
+ *
+ * Returning null is not the same as "safe": the file is still read by
+ * every language-agnostic check. It only means this particular check
+ * has nothing precise to say, which is the honest position — a
+ * half-guessed pattern for a language nobody here has tuned would
+ * produce exactly the confident false positives this catalog keeps
+ * having to walk back.
+ */
 function langOf(path: string): Lang | null {
   if (/\.m?[jt]sx?$/i.test(path)) return "js";
   if (/\.py$/i.test(path)) return "py";
   if (/\.(sh|bash|zsh)$/i.test(path)) return "sh";
+  if (/\.go$/i.test(path)) return "go";
+  if (/\.rs$/i.test(path)) return "rust";
+  if (/\.php$/i.test(path)) return "php";
+  if (/\.rb$/i.test(path)) return "ruby";
   return null;
 }
 
@@ -233,6 +264,43 @@ const DYNAMIC_EXEC: Record<Lang, ReadonlyArray<Pattern>> = {
     { re: /(?:^|[;=(,\s])exec\s*\(\s*(?!["'])/, what: "exec() on a built string" },
     { re: /(?:^|[;=(,\s])eval\s*\(\s*(?!["'][^"']*["']\s*\))/, what: "eval() on a non-literal" },
     { re: /(?<![.\w])compile\s*\([^)]*,\s*["']<?string>?["']/, what: "compile() of a string" },
+  ],
+  go: [
+    // `exec.Command("sh", "-c", …)` is Go's shell-out. GitHub's own MCP
+    // server is Go, and so is a growing share of the ecosystem.
+    {
+      re: /\bexec\.Command(?:Context)?\s*\(\s*(?:[a-zA-Z_][\w.]*\s*,\s*)?["`](?:\/bin\/)?(?:ba|z)?sh["`]\s*,/,
+      what: "spawning a shell via exec.Command",
+    },
+    // NOT flagged: `exec.Command(name, args...)` with a computed name.
+    // Go's exec.Command does not invoke a shell — it execs a binary
+    // directly, which makes it the equivalent of Node's `spawn` with an
+    // argv array, the form this check ASKS people to use. Flagging it
+    // failed github/github-mcp-server on
+    // `exec.Command(cmdParts[0], cmdParts[1:]...)`, which is the safe
+    // idiom. The shell only enters via an explicit "sh" -c.
+    { re: /\b(?:curl|wget)\b[^"`]*\|\s*(?:ba|z)?sh\b/, what: "piping a download into a shell" },
+  ],
+  rust: [
+    {
+      re: /\bCommand::new\s*\(\s*"(?:\/bin\/)?(?:ba|z)?sh"\s*\)/,
+      what: "spawning a shell via Command::new",
+    },
+    // Same reasoning as Go: Rust's Command::new execs a binary, it
+    // does not go through a shell.
+  ],
+  php: [
+    { re: /\b(?:eval|assert)\s*\(\s*(?!["'])/, what: "eval() on a built string" },
+    {
+      re: /\b(?:shell_exec|passthru|system|popen|proc_open)\s*\(/,
+      what: "shell execution",
+    },
+    { re: /\bbase64_decode\s*\([^)]*\)\s*\)?\s*;?\s*$/m, what: "decoding a payload" },
+  ],
+  ruby: [
+    { re: /\beval\s*\(\s*(?!["'])/, what: "eval() on a built string" },
+    { re: /\b(?:system|exec)\s*\(\s*(?!["'])/, what: "shell execution on a built string" },
+    { re: /`[^`]*\$\{/, what: "backtick execution with interpolation" },
   ],
   sh: [
     // The actual shell-side attack: fetch a script and run it unseen.
