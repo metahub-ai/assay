@@ -305,6 +305,31 @@ describe("no-assembled-credentials", () => {
     expect(r.status).toBe("fail");
   });
 
+  it("folds a join written with spaces and a trailing comma", async () => {
+    const r = await run(
+      noAssembledCredentials,
+      ctxFor({ "a.js": 'const T = [ "ghp", "_", "a".repeat(36), ].join("");' }),
+    );
+    expect(r.status).toBe("fail");
+  });
+
+  it("terminates promptly on a long string list that never joins", async () => {
+    // Regression: the join-folding regex used to carry `\s*` on both
+    // sides of an optional comma inside a `+`, giving the engine
+    // exponentially many whitespace splits to try whenever the overall
+    // match failed. Python trips it constantly — long string lists are
+    // idiomatic and `.join("")` never follows one — and a single 79 KB
+    // .py file held the checker at 100% CPU for 40+ minutes in
+    // production. With the unambiguous grammar this completes in
+    // milliseconds; the generous bound just keeps slow CI green.
+    const entries = Array.from({ length: 400 }, (_, i) => `"tag_${i}"`).join(", ");
+    const body = `SUPPORTED = [${entries}]\nprint("no join call here")\n`;
+    const started = Date.now();
+    const r = await run(noAssembledCredentials, ctxFor({ "a.py": body }));
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(r.status).toBe("pass");
+  });
+
   it("stays quiet when nothing is assembled", async () => {
     const r = await run(
       noAssembledCredentials,

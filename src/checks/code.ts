@@ -1110,8 +1110,16 @@ function foldStrings(body: string): string {
   });
 
   // ["a","b"].join("") → "ab"
+  //
+  // The element list is written string-first, comma-separated, with an
+  // optional trailing comma — NOT `(?:\s*STR\s*,?)+`. That shape put
+  // `\s*` on both sides of an optional comma inside a `+`, which gave
+  // the engine exponentially many ways to split the whitespace whenever
+  // the overall match went on to fail — and in a Python file every long
+  // string list fails it, because Python spells this `"".join(list)`.
+  // One 79 KB .py file held the checker at 100% CPU for 40+ minutes.
   out = out.replace(
-    /\[\s*((?:\s*(?:"[^"]*"|'[^']*')\s*,?)+)\s*\]\s*\.join\(\s*(?:""|'')\s*\)/g,
+    /\[\s*((?:"[^"]*"|'[^']*')(?:\s*,\s*(?:"[^"]*"|'[^']*'))*)\s*,?\s*\]\s*\.join\(\s*(?:""|'')\s*\)/g,
     (_m, inner) => {
       const parts = String(inner).match(/"([^"]*)"|'([^']*)'/g) ?? [];
       return JSON.stringify(parts.map((p) => p.slice(1, -1)).join(""));
@@ -1142,7 +1150,12 @@ function foldStrings(body: string): string {
 
 export const noAssembledCredentials = defineCheck({
   id: "no-assembled-credentials",
-  version: "1.0.0",
+  // 1.0.1: the join-folding regex was rewritten to an unambiguous
+  // grammar after catastrophic backtracking on long non-joined string
+  // lists (idiomatic Python) pinned the checker at 100% CPU. Verdicts
+  // on well-formed inputs are unchanged; inputs that previously never
+  // returned now do.
+  version: "1.0.1",
   title: "No credentials assembled from parts",
   category: "safety",
   axis: "safety",

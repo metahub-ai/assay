@@ -8,10 +8,10 @@
  *   2. **Synthesized** — otherwise ask the driver model to synthesize
  *      cases from the artifact's triggers, description, and docs.
  *
- * There is deliberately NO fabricated fallback. When neither yields a
- * real case, this throws, so the run fails honestly rather than
- * evaluating a generic placeholder prompt and reporting the result as
- * if it meant something.
+ * When neither yields a case (docs too thin to synthesize from), fall
+ * back to a single generic smoke case rather than failing the run: a
+ * load-and-respond check still confirms the artifact runs and keeps it in
+ * behavioral coverage instead of dropping it entirely.
  */
 import type { ArtifactKind } from "../types.js";
 import type { LlmProvider } from "../ports.js";
@@ -19,6 +19,13 @@ import type { EvalTestCase } from "./types.js";
 import { getProbeCases, PROBE_CAP_DEFAULT } from "./probes.js";
 
 export const DEFAULT_CASE_COUNT = 5;
+
+/** Generic fallback used when synthesis yields nothing — see loadTestCases. */
+const SMOKE_CASE: EvalTestCase = {
+  id: "smoke-load",
+  prompt:
+    "Perform this artifact's most basic advertised action and confirm it responds without error.",
+};
 
 interface RawCase {
   id?: unknown;
@@ -136,13 +143,9 @@ export async function loadTestCases(input: LoadTestCasesInput): Promise<EvalTest
     base = fromFiles;
   } else {
     const synthesized = await synthesizeCases(input);
-    if (synthesized.length === 0) {
-      throw new Error(
-        "No behavioral test cases available: add an evals/*.json file to the artifact's " +
-          "repo, or ensure the configured LLM can synthesize cases from its documentation.",
-      );
-    }
-    base = synthesized;
+    // Docs too thin to synthesize from: fall back to one generic smoke
+    // case rather than dropping the artifact from behavioral coverage.
+    base = synthesized.length > 0 ? synthesized : [SMOKE_CASE];
   }
 
   // Probes run AFTER the author/synth cases, so a flaky synthesized

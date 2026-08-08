@@ -121,10 +121,14 @@ class ContainerSandbox implements Sandbox {
     }
   }
 
-  async exec(cmd: string, opts?: { cwd?: string; timeoutMs?: number }): Promise<ExecResult> {
+  async exec(
+    cmd: string,
+    opts?: { cwd?: string; timeoutMs?: number; env?: Record<string, string> },
+  ): Promise<ExecResult> {
     const start = Date.now();
     const args = ["exec"];
     if (opts?.cwd) args.push("-w", opts.cwd);
+    for (const [k, v] of Object.entries(opts?.env ?? {})) args.push("-e", `${k}=${v}`);
     args.push(this.id, "sh", "-lc", cmd);
     const r = await cli(this.bin, args, opts?.timeoutMs ? { timeoutMs: opts.timeoutMs } : {});
     return {

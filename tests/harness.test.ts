@@ -13,6 +13,7 @@ import { runSkillCase } from "../src/behavioral/harness/skill";
 import { runAgentCase } from "../src/behavioral/harness/agent";
 import { runMcpCase } from "../src/behavioral/harness/mcp";
 import { fakeLlmProvider, FakeSandbox, makeFakeSandboxProvider } from "./fakes";
+import { SandboxInfraError } from "../src/ports";
 import type { EvalTestCase } from "../src/behavioral/types";
 
 const test: EvalTestCase = { id: "t1", prompt: "Do the primary thing." };
@@ -400,6 +401,62 @@ describe("mcp harness", () => {
     expect(t.toolCalls).toHaveLength(0);
   });
 
+  it("classifies an initialize timeout as an environment failure, not a verdict", async () => {
+    // A server that never answers the handshake told us nothing about
+    // itself — it may just need credentials the harness doesn't provide.
+    // Returning a transcript here let the judge grade our own timeout:
+    // 14 near-identical 2.5/10 verdicts in one production batch.
+    const sandbox = withDriver(driverOut({ ok: false, error: "timeout: initialize" }));
+    await expect(runMcpCase({ sandbox, cwd: "/workspace", test })).rejects.toThrow(
+      SandboxInfraError,
+    );
+  });
+
+  it("classifies a whole-driver timeout as an environment failure too", async () => {
+    const sandbox = new FakeSandbox({
+      rules: [
+        {
+          match: /mcp-driver\.mjs/,
+          result: () => ({ exitCode: -1, stdout: "", stderr: "", durationMs: 90_000, timedOut: true }),
+        },
+      ],
+    });
+    await expect(runMcpCase({ sandbox, cwd: "/workspace", test })).rejects.toThrow(
+      SandboxInfraError,
+    );
+  });
+
+  it("a tools/list hang after a good handshake is the same environment failure", async () => {
+    const sandbox = withDriver(driverOut({ ok: false, error: "timeout: tools/list" }));
+    await expect(runMcpCase({ sandbox, cwd: "/workspace", test })).rejects.toThrow(
+      SandboxInfraError,
+    );
+  });
+
+  it("names the manifest's declared env vars in a timeout diagnosis", async () => {
+    // "Declares OPENAI_API_KEY; likely not testable without credentials"
+    // is a state an operator can classify; a bare timeout is retry bait.
+    const sandbox = withDriver(driverOut({ ok: false, error: "timeout: initialize" }));
+    await sandbox.writeFiles([
+      {
+        path: "/workspace/mcp.json",
+        contents: JSON.stringify({
+          mcpServers: { srv: { env: { OPENAI_API_KEY: "", SEARCH_TOKEN: "" } } },
+        }),
+      },
+    ]);
+    await expect(runMcpCase({ sandbox, cwd: "/workspace", test })).rejects.toThrow(
+      /OPENAI_API_KEY, SEARCH_TOKEN/,
+    );
+  });
+
+  it("falls back to the generic credentials hint when nothing is declared", async () => {
+    const sandbox = withDriver(driverOut({ ok: false, error: "timeout: initialize" }));
+    await expect(runMcpCase({ sandbox, cwd: "/workspace", test })).rejects.toThrow(
+      /may need real credentials or environment/,
+    );
+  });
+
   it("handles unparseable driver output", async () => {
     const sandbox = withDriver("not json at all");
     const t = await runMcpCase({ sandbox, cwd: "/workspace", test });
@@ -445,6 +502,9 @@ describe("MCP driver placement", () => {
       },
       async writeFiles(files: { path: string }[]) {
         written.push(...files.map((f) => f.path));
+      },
+      async readFile() {
+        return null;
       },
       async dispose() {},
     } as never;

@@ -38,8 +38,26 @@ export interface InstallOutcome {
   ok: boolean;
 }
 
-const INSTALL_TIMEOUT_MS = 180_000;
+const INSTALL_TIMEOUT_MS = 300_000;
 const BUILD_TIMEOUT_MS = 180_000;
+
+/**
+ * Pick the install command by ecosystem. Node is the default; a Python
+ * project (requirements.txt / pyproject.toml) needs pip. The richer
+ * sandbox image is what actually provides pip — this only chooses the
+ * command; a template without Python will still fail the install as infra.
+ */
+async function resolveInstallCmd(sandbox: Sandbox, cwd: string): Promise<string> {
+  // `python3 -m pip` rather than a bare `pip` so it works regardless of
+  // whether the image aliases pip/pip3.
+  if ((await sandbox.readFile(`${cwd}/requirements.txt`)) !== null) {
+    return "python3 -m pip install --no-input -r requirements.txt";
+  }
+  if ((await sandbox.readFile(`${cwd}/pyproject.toml`)) !== null) {
+    return "python3 -m pip install --no-input .";
+  }
+  return "npm install --ignore-scripts --no-audit --no-fund";
+}
 
 /**
  * Does the package declare an entry point that does not exist yet?
@@ -67,8 +85,10 @@ export async function installDependencies(
   installCmd?: string,
 ): Promise<InstallOutcome> {
   // An explicitly configured command is the caller's business; they may
-  // have a good reason and they own the consequences.
-  const cmd = installCmd ?? "npm install --ignore-scripts --no-audit --no-fund";
+  // have a good reason and they own the consequences. Otherwise pick by
+  // ecosystem (Node default, pip for Python projects).
+  const cmd = installCmd ?? (await resolveInstallCmd(sandbox, cwd));
+  const isPython = /\bpip3?\b/.test(cmd);
   const install = await sandbox.exec(cmd, { cwd, timeoutMs: INSTALL_TIMEOUT_MS });
   let log = `install exit=${install.exitCode}\n${install.stdout || install.stderr}`.trim();
 
@@ -94,8 +114,9 @@ export async function installDependencies(
 
   if (installCmd) return { log, ok: true };
 
-  // Only now, and only if something is actually missing.
-  if (await needsBuild(sandbox, cwd)) {
+  // Only now, and only if something is actually missing. npm-only: a
+  // Python project has no `npm run build`.
+  if (!isPython && (await needsBuild(sandbox, cwd))) {
     const build = await sandbox.exec("npm run build --if-present", {
       cwd,
       timeoutMs: BUILD_TIMEOUT_MS,
