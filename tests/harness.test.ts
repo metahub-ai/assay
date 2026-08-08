@@ -417,7 +417,13 @@ describe("mcp harness", () => {
       rules: [
         {
           match: /mcp-driver\.mjs/,
-          result: () => ({ exitCode: -1, stdout: "", stderr: "", durationMs: 90_000, timedOut: true }),
+          result: () => ({
+            exitCode: -1,
+            stdout: "",
+            stderr: "",
+            durationMs: 90_000,
+            timedOut: true,
+          }),
         },
       ],
     });
