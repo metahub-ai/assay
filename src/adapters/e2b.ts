@@ -54,10 +54,17 @@ export class E2bSandbox implements Sandbox {
     for (const f of files) await this.api.files.write(f.path, f.contents);
   }
 
-  async exec(cmd: string, opts?: { cwd?: string; timeoutMs?: number }): Promise<ExecResult> {
+  async exec(
+    cmd: string,
+    opts?: { cwd?: string; timeoutMs?: number; env?: Record<string, string> },
+  ): Promise<ExecResult> {
     const start = Date.now();
     try {
-      const r = await this.api.commands.run(cmd, opts);
+      // E2B's SDK spells the env map `envs`; translate so the harness's
+      // vendor-neutral `env` reaches the process and any child it spawns.
+      const { env, ...rest } = opts ?? {};
+      const runOpts = env ? { ...rest, envs: env } : rest;
+      const r = await this.api.commands.run(cmd, runOpts);
       return {
         exitCode: r.exitCode,
         stdout: r.stdout,
@@ -113,13 +120,21 @@ export const e2bSandboxProvider: SandboxProvider = {
     // e2b exposes two static `create` overloads: `(opts)` for the
     // default template and `(template, opts)` for a named template.
     // We branch so each call matches one overload cleanly.
+    //
+    // E2B_TEMPLATE fills in when the caller did not name an image. The
+    // vendor's default template ships Node 20.9, below the >=20.19
+    // floor current toolchains declare (vite 8 among them), which
+    // terminal-failed 162 installs in one production catalog sweep.
+    // An operator with a newer template gets to point at it with an
+    // env var instead of a code change.
+    const template = spec.image ?? process.env.E2B_TEMPLATE;
     const opts = {
       apiKey: process.env.E2B_API_KEY,
       ...(spec.timeoutMs ? { timeoutMs: spec.timeoutMs } : {}),
     };
     try {
-      const api = spec.image
-        ? await E2bSandboxApi.create(spec.image, opts)
+      const api = template
+        ? await E2bSandboxApi.create(template, opts)
         : await E2bSandboxApi.create(opts);
       return new E2bSandbox(api);
     } catch (err) {

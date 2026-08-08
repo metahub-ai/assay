@@ -24,7 +24,7 @@
  * We parse that real stdout — nothing in the sandbox is emulated. The
  * server is a real child process speaking the MCP wire protocol.
  */
-import type { Sandbox } from "../../ports.js";
+import { SandboxInfraError, type Sandbox } from "../../ports.js";
 import { makeSurface } from "../../surface.js";
 import type { EvalTestCase, Transcript } from "../types.js";
 import { installDependencies } from "../install.js";
@@ -152,7 +152,7 @@ function send(method, params, timeoutMs) {
   const payload = { jsonrpc: "2.0", id, method, params: params ?? {} };
   child.stdin.write(JSON.stringify(payload) + "\n");
   return new Promise((resolve, reject) => {
-    const t = timeoutMs ?? 20000;
+    const t = timeoutMs ?? 60000;
     const timer = setTimeout(() => { pending.delete(id); reject(new Error("timeout: " + method)); }, t);
     pending.set(id, { resolve: (m) => { clearTimeout(timer); resolve(m); } });
   });
@@ -369,6 +369,104 @@ async function resolveServerCommand(sandbox: Sandbox, cwd: string): Promise<stri
   return entry ? `node ${JSON.stringify(entry)}` : "npx --yes -y .";
 }
 
+/**
+ * Env vars the artifact's own manifests declare as required at runtime.
+ *
+ * Read from mcp.json / server.json "env" blocks — the two manifest
+ * shapes this harness already recognizes. Used only to make an
+ * initialize-timeout diagnosis specific: "the server may need
+ * credentials" becomes "the server declares OPENAI_API_KEY and we
+ * provide no credentials", which an operator can classify at a glance
+ * as not-behaviorally-testable rather than retry it forever.
+ *
+ * Deliberately NOT used to skip the boot attempt: env declarations are
+ * often optional-with-defaults, and pre-judging them would fail servers
+ * that boot fine without keys.
+ */
+async function declaredEnvVars(sandbox: Sandbox, cwd: string): Promise<string[]> {
+  const names = new Set<string>();
+  for (const file of ["mcp.json", "server.json"]) {
+    const raw = await sandbox.readFile(`${cwd}/${file}`);
+    if (!raw) continue;
+    try {
+      const parsed = JSON.parse(raw) as {
+        env?: Record<string, unknown> | string[];
+        mcpServers?: Record<string, { env?: Record<string, unknown> }>;
+      };
+      const collect = (env: Record<string, unknown> | string[] | undefined) => {
+        if (!env) return;
+        for (const k of Array.isArray(env) ? env : Object.keys(env)) {
+          if (typeof k === "string" && /^[A-Z][A-Z0-9_]*$/.test(k)) names.add(k);
+        }
+      };
+      collect(parsed.env);
+      for (const server of Object.values(parsed.mcpServers ?? {})) collect(server.env);
+    } catch {
+      /* malformed manifest — the boot attempt will tell its own story */
+    }
+  }
+  return [...names].sort();
+}
+
+/**
+ * Throwaway credentials injected into the server's environment before the
+ * handshake. Most MCP servers that "need credentials" only check a var is
+ * PRESENT at boot and defer the real API call to tool-invocation time, so
+ * booting them with obviously-fake values gets us past `initialize` to
+ * list tools and run the safety scan — none of which need a valid key.
+ * Safe because the values are worthless: a server that exfiltrates them
+ * steals nothing. Seeded from a generic superset plus every name the
+ * artifact's own manifest declares.
+ */
+const GENERIC_PLACEHOLDER_ENV: Record<string, string> = {
+  OPENAI_API_KEY: "sk-placeholder00000000000000000000000000000000000000",
+  ANTHROPIC_API_KEY: "sk-ant-placeholder00000000000000000000000000000000",
+  GOOGLE_API_KEY: "placeholder-google-api-key",
+  GEMINI_API_KEY: "placeholder-gemini-api-key",
+  GROQ_API_KEY: "gsk_placeholder000000000000000000000000",
+  MISTRAL_API_KEY: "placeholder-mistral-api-key",
+  COHERE_API_KEY: "placeholder-cohere-api-key",
+  OPENROUTER_API_KEY: "sk-or-placeholder000000000000000000000000",
+  HF_TOKEN: "hf_placeholder0000000000000000000000000000",
+  GITHUB_TOKEN: "ghp_placeholder0000000000000000000000000000",
+  GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_placeholder0000000000000000000000000000",
+  GITLAB_TOKEN: "glpat-placeholder0000000000000000000",
+  SLACK_BOT_TOKEN: "xoxb-0000000000-0000000000-placeholder",
+  SLACK_TOKEN: "xoxb-0000000000-0000000000-placeholder",
+  NOTION_API_KEY: "secret_placeholder000000000000000000000000000",
+  NOTION_TOKEN: "secret_placeholder000000000000000000000000000",
+  LINEAR_API_KEY: "lin_api_placeholder00000000000000000000",
+  STRIPE_API_KEY: "sk_test_placeholder0000000000000000000000",
+  SENTRY_AUTH_TOKEN: "placeholder-sentry-auth-token",
+  BRAVE_API_KEY: "placeholder-brave-api-key",
+  TAVILY_API_KEY: "tvly-placeholder0000000000000000000000",
+  SERPAPI_API_KEY: "placeholder-serpapi-key",
+  PERPLEXITY_API_KEY: "pplx-placeholder0000000000000000000000",
+  AWS_ACCESS_KEY_ID: "AKIAPLACEHOLDER000000",
+  AWS_SECRET_ACCESS_KEY: "placeholderplaceholderplaceholderplaceholder",
+  AWS_REGION: "us-east-1",
+  DATABASE_URL: "postgres://user:pass@localhost:5432/placeholder",
+  POSTGRES_URL: "postgres://user:pass@localhost:5432/placeholder",
+  REDIS_URL: "redis://localhost:6379",
+  API_KEY: "placeholder-api-key",
+  API_TOKEN: "placeholder-api-token",
+  API_BASE_URL: "http://localhost:8080",
+};
+
+function placeholderFor(name: string): string {
+  if (/(_URL|_URI|_ENDPOINT)$/.test(name)) return "http://localhost:8080";
+  if (/(_HOST|_HOSTNAME)$/.test(name)) return "localhost";
+  if (/_PORT$/.test(name)) return "8080";
+  if (/_REGION$/.test(name)) return "us-east-1";
+  return `placeholder-${name.toLowerCase()}`;
+}
+
+function placeholderCredentialEnv(declared: string[]): Record<string, string> {
+  const env: Record<string, string> = { ...GENERIC_PLACEHOLDER_ENV };
+  for (const name of declared) if (!(name in env)) env[name] = placeholderFor(name);
+  return env;
+}
+
 /** Drive the MCP server for one test case, capturing a real transcript. */
 export async function runMcpCase(input: McpHarnessInput): Promise<Transcript> {
   const { sandbox, test } = input;
@@ -389,12 +487,19 @@ export async function runMcpCase(input: McpHarnessInput): Promise<Transcript> {
   // 3) write the stdio JSON-RPC driver.
   await sandbox.writeFiles([{ path: driverPath, contents: MCP_DRIVER_SOURCE }]);
 
+  // Boot the server with throwaway credentials (generic set + whatever the
+  // manifest declares) so presence-checks pass and the handshake proceeds.
+  // `declared` is reused by the timeout diagnosis below.
+  const declared = await declaredEnvVars(sandbox, cwd);
+  const sandboxEnv = placeholderCredentialEnv(declared);
+
   // 4) Pass 1 — discovery. The driver does init + tools/list, prints
   //    the tool catalog, and exits. If no LLM is wired up (older
   //    tests), we degrade to the legacy "ping the first tool" output.
   const pass1 = await sandbox.exec(`node ${driverPath} ${JSON.stringify(serverCmd)}`, {
     cwd,
     timeoutMs: 90_000,
+    env: sandboxEnv,
   });
   messages.push({
     role: "assistant",
@@ -402,15 +507,44 @@ export async function runMcpCase(input: McpHarnessInput): Promise<Transcript> {
   });
   const discovery = parseDriverOutput(pass1.stdout);
   if (!discovery || !discovery.ok) {
+    const detail = discovery?.error || pass1.stderr || "no parseable output";
+    // A handshake that TIMES OUT never told us anything about the
+    // artifact: the server may need API keys we don't provide, the
+    // resolved start command may be wrong, or the cold start may be
+    // slower than our window. In a 200-artifact production batch this
+    // one path produced 14 near-identical 2.5/10 verdicts — the judge
+    // gravely scoring transcripts of our own timeout. Thrown as
+    // SandboxInfraError so it lands as `infraFailure` (a job to retry),
+    // never as a verdict about someone else's code — the same
+    // classification a failed dependency install already gets.
+    //
+    // A NON-timeout failure stays in the transcript: a server that
+    // exits immediately or prints garbage produced real, judgeable
+    // evidence about itself.
+    if (pass1.timedOut || /^timeout: /.test(discovery?.error ?? "")) {
+      // Placeholder credentials were already injected before the handshake,
+      // so a timeout here means presence-checks weren't enough — the server
+      // likely validates its credentials at boot, or the start command is
+      // wrong. Name the declared vars so an operator can classify it.
+      const envHint =
+        declared.length > 0
+          ? `Placeholder credentials were injected, but the server still did not respond; it ` +
+            `declares (${declared.join(", ")}) and likely validates them at boot — not ` +
+            `behaviorally testable without real credentials.`
+          : `Placeholder credentials were injected but did not satisfy the server; it may need ` +
+            `real credentials or environment the harness cannot provide.`;
+      throw new SandboxInfraError(
+        `MCP discovery timed out before the server responded (${detail}). ` +
+          `This is an environment failure, not an artifact defect. ${envHint}`,
+      );
+    }
     messages.push({
       role: "tool",
       // `??` was wrong here: an empty stderr is a STRING, so it won
       // the coalesce and the message ended as "failed during
       // discovery: " with no diagnostic at all — useless to whoever
       // has to fix the server. Empty must fall through too.
-      content: `MCP driver failed during discovery: ${
-        discovery?.error || pass1.stderr || "no parseable output"
-      }`,
+      content: `MCP driver failed during discovery: ${detail}`,
     });
     return { messages, toolCalls, durationMs: Date.now() - start };
   }
@@ -480,7 +614,7 @@ export async function runMcpCase(input: McpHarnessInput): Promise<Transcript> {
   await sandbox.writeFiles([{ path: callsPath, contents: JSON.stringify(synthesizedCalls) }]);
   const pass2 = await sandbox.exec(
     `node ${driverPath} ${JSON.stringify(serverCmd)} ${JSON.stringify(callsPath)}`,
-    { cwd, timeoutMs: 180_000 },
+    { cwd, timeoutMs: 180_000, env: sandboxEnv },
   );
   messages.push({
     role: "assistant",

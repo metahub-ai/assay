@@ -136,8 +136,18 @@ export interface Sandbox {
   /** Write a batch of files. Batched because a per-file round trip to a
    *  cloud sandbox costs 100–300ms each. */
   writeFiles(files: { path: string; contents: string }[]): Promise<void>;
-  /** Run a shell command, capturing stdio + timing. */
-  exec(cmd: string, opts?: { cwd?: string; timeoutMs?: number }): Promise<ExecResult>;
+  /**
+   * Run a shell command, capturing stdio + timing.
+   *
+   * `env` sets environment variables for the command AND every child it
+   * spawns (the MCP harness relies on this to hand a booting server
+   * throwaway credentials). Adapters translate it to their vendor's
+   * spelling — E2B's `envs`, podman's `-e` flags.
+   */
+  exec(
+    cmd: string,
+    opts?: { cwd?: string; timeoutMs?: number; env?: Record<string, string> },
+  ): Promise<ExecResult>;
   /** Read a file back; null when it doesn't exist. */
   readFile(path: string): Promise<string | null>;
   /** Tear the sandbox down. Idempotent. */
