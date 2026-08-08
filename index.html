@@ -1,0 +1,39 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Assay — talk</title>
+<style>
+:root{--ground:#140e08;--paper:#faf6ec;--sand:#d8c6ad;--muted:#a3907c;--faint:#7c6a5a;--line:#40332a;--panel:#241a12;--clay:#ec9873;--clay-bright:#f3b393;--clay-deep:#b0492c;--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;--sans:ui-sans-serif,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--ground);color:var(--sand);font-family:var(--sans);min-height:100vh;display:grid;place-content:center;gap:1.6rem;padding:3rem 1.5rem;-webkit-font-smoothing:antialiased;
+background-image:radial-gradient(120% 90% at 82% 8%,rgba(236,152,115,.16),transparent 55%),radial-gradient(90% 80% at 4% 96%,rgba(176,73,44,.12),transparent 60%)}
+.wm{display:inline-flex;align-items:center;gap:.7rem;font-family:var(--mono);letter-spacing:.14em;text-transform:uppercase;font-size:.78rem;color:var(--muted)}
+.wm .dot{width:32px;height:32px;display:grid;place-items:center;border:1px solid var(--line);border-radius:9px;color:var(--clay);font-size:1.1rem;background:var(--panel)}
+h1{color:var(--paper);font-size:clamp(2rem,5vw,3.2rem);font-weight:800;letter-spacing:-.03em;line-height:1.02;text-wrap:balance;max-width:16ch}
+p.lede{color:var(--sand);font-size:1.1rem;line-height:1.5;max-width:48ch}
+.cards{display:flex;flex-wrap:wrap;gap:1rem;margin-top:.6rem}
+a.card{text-decoration:none;border:1px solid var(--line);border-radius:14px;background:linear-gradient(180deg,#241a12,#1b130c);padding:1.3rem 1.5rem;min-width:290px;display:flex;flex-direction:column;gap:.4rem;transition:border-color .2s,transform .2s}
+a.card:hover{border-color:var(--clay-deep);transform:translateY(-2px)}
+a.card .k{font-family:var(--mono);font-size:.7rem;letter-spacing:.14em;text-transform:uppercase;color:var(--clay)}
+a.card .t{color:var(--paper);font-size:1.25rem;font-weight:700;letter-spacing:-.01em}
+a.card .d{color:var(--muted);font-size:.92rem;line-height:1.4}
+a.card .go{color:var(--clay-bright);font-family:var(--mono);font-size:.82rem;margin-top:.3rem}
+.dl{display:flex;flex-wrap:wrap;gap:.6rem;align-items:center;margin-top:.4rem}
+.dl .lbl{font-family:var(--mono);font-size:.7rem;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);margin-right:.2rem}
+.dl a{text-decoration:none;font-family:var(--mono);font-size:.82rem;color:var(--sand);border:1px solid var(--line);border-radius:9px;padding:.45rem .8rem;background:rgba(36,26,18,.5);transition:border-color .2s,color .2s}
+.dl a:hover{border-color:var(--clay-deep);color:var(--paper)}
+.foot{font-family:var(--mono);font-size:.74rem;color:var(--faint);margin-top:1rem}
+.foot a{color:var(--clay)}
+</style></head><body>
+<div class="wm"><span class="dot">&#10059;</span> Assay</div>
+<h1>An open framework for evaluating AI artifacts.</h1>
+<p class="lede">A talk for people who install skills, MCP servers, agents, and plugins, and would like to know what they actually do before they run.</p>
+<div class="cards">
+  <a class="card" href="deck.html"><span class="k">Present</span><span class="t">The deck</span><span class="d">8 slides. Press F for full screen, arrow keys to move.</span><span class="go">Open &rarr;</span></a>
+</div>
+<div class="dl">
+  <span class="lbl">Download</span>
+  <a href="Assay-Deck.pdf">Deck (PDF)</a>
+  <a href="Assay-demo-kit.zip">Demo kit (zip)</a>
+</div>
+<p class="foot">Assay is open source &middot; <a href="https://github.com/metahub-ai/assay">github.com/metahub-ai/assay</a></p>
+</body></html>
