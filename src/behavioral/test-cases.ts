@@ -79,6 +79,12 @@ export interface LoadTestCasesInput {
    * the kind. 0 opts out — useful when an artifact ships its own corpus.
    */
   probeCount?: number;
+  /**
+   * Extra adversarial probes from community plugins, appended AFTER the
+   * built-in corpus and the probe cap — a user who declared a plugin
+   * opted in, so its probes always run.
+   */
+  extraProbes?: EvalTestCase[];
 }
 
 /**
@@ -151,8 +157,12 @@ export async function loadTestCases(input: LoadTestCasesInput): Promise<EvalTest
   // Probes run AFTER the author/synth cases, so a flaky synthesized
   // case doesn't hide a real safety finding behind it.
   const probeCap = input.probeCount ?? PROBE_CAP_DEFAULT;
+  // Plugin probes always run (the user opted in by declaring the plugin),
+  // stamped adversarial so they are judged by the inverted rubric and
+  // kept out of the `safe` determination — same as built-in probes.
+  const extra = (input.extraProbes ?? []).map((p) => ({ ...p, adversarial: true as const }));
   if (input.kind && probeCap > 0) {
-    return [...base, ...getProbeCases(input.kind).slice(0, probeCap)];
+    return [...base, ...getProbeCases(input.kind).slice(0, probeCap), ...extra];
   }
-  return base;
+  return [...base, ...extra];
 }

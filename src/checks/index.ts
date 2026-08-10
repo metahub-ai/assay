@@ -14,8 +14,12 @@ import { SUPPLY_CHAIN_CHECKS } from "./supply-chain.js";
 import { CONTENT_CHECKS } from "./content.js";
 import { CODE_CHECKS } from "./code.js";
 import { SKILL_CHECKS } from "./kinds/skill.js";
+import { SKILL_SAFETY_CHECKS } from "./kinds/skill-safety.js";
 import { MCP_CHECKS } from "./kinds/mcp.js";
+import { MCP_SURFACE_CHECKS } from "./kinds/mcp-surface.js";
+import { MCP_AUTH_CHECKS } from "./kinds/mcp-auth.js";
 import { AGENT_CHECKS } from "./kinds/agent.js";
+import { AGENT_SAFETY_CHECKS } from "./kinds/agent-safety.js";
 import { PLUGIN_CHECKS } from "./kinds/plugin.js";
 import type { CheckDefinition } from "../check.js";
 
@@ -25,8 +29,12 @@ export { DOCUMENTATION_CHECKS } from "./documentation.js";
 export { SUPPLY_CHAIN_CHECKS } from "./supply-chain.js";
 export { CODE_CHECKS } from "./code.js";
 export { SKILL_CHECKS } from "./kinds/skill.js";
+export { SKILL_SAFETY_CHECKS } from "./kinds/skill-safety.js";
 export { MCP_CHECKS } from "./kinds/mcp.js";
+export { MCP_SURFACE_CHECKS } from "./kinds/mcp-surface.js";
+export { MCP_AUTH_CHECKS } from "./kinds/mcp-auth.js";
 export { AGENT_CHECKS } from "./kinds/agent.js";
+export { AGENT_SAFETY_CHECKS } from "./kinds/agent-safety.js";
 export { PLUGIN_CHECKS } from "./kinds/plugin.js";
 
 /**
@@ -42,7 +50,11 @@ export const DEFAULT_CHECKS: readonly CheckDefinition[] = [
   ...CONTENT_CHECKS,
   ...CODE_CHECKS,
   ...SKILL_CHECKS,
+  ...SKILL_SAFETY_CHECKS,
   ...MCP_CHECKS,
+  ...MCP_SURFACE_CHECKS,
+  ...MCP_AUTH_CHECKS,
   ...AGENT_CHECKS,
+  ...AGENT_SAFETY_CHECKS,
   ...PLUGIN_CHECKS,
 ];

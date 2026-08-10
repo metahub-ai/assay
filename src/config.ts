@@ -50,6 +50,19 @@ export interface AssayConfig {
   suite?: string;
   /** Fail the run when the overall score is below this. */
   minScore?: number;
+  /**
+   * Hosts the artifact legitimately talks to. Consulted by the
+   * behavioral safety scan and the runtime ledger's undeclared-host
+   * diff — a host listed here is "declared", not a finding.
+   */
+  allowedHosts?: string[];
+  /**
+   * Community check/probe packs to load, as paths relative to this
+   * config file. Each is a JSON plugin declaring pattern checks and/or
+   * adversarial probes — the declarative authoring format, so a new rule
+   * ships without touching the framework's TypeScript. See docs/PLUGINS.md.
+   */
+  plugins?: string[];
 }
 
 export const CONFIG_FILENAMES = ["assay.config.json", ".assayrc.json", ".assayrc"] as const;
@@ -117,7 +130,16 @@ export function parseConfig(raw: string, path = "config"): AssayConfig {
   // and unknown keys were being ignored quietly. `{"minscore": 80}`,
   // `{"waiver": [...]}` and `{"minScore": "80"}` all parsed cleanly and
   // did nothing. A misspelled gate is an absent gate.
-  const KNOWN = ["$schema", "settings", "disable", "waivers", "suite", "minScore"];
+  const KNOWN = [
+    "$schema",
+    "settings",
+    "disable",
+    "waivers",
+    "suite",
+    "minScore",
+    "allowedHosts",
+    "plugins",
+  ];
   const unknown = Object.keys(o).filter((k) => !KNOWN.includes(k));
   if (unknown.length > 0) {
     const near = (k: string) => KNOWN.find((v) => v.toLowerCase() === k.toLowerCase());
@@ -153,6 +175,18 @@ export function parseConfig(raw: string, path = "config"): AssayConfig {
       throw new Error(`${path}: "minScore" must be a number, not ${typeof o["minScore"]}.`);
     }
     config.minScore = o["minScore"];
+  }
+  if (o["allowedHosts"] !== undefined) {
+    if (!Array.isArray(o["allowedHosts"])) {
+      throw new Error(`${path}: "allowedHosts" must be an array of hostnames.`);
+    }
+    config.allowedHosts = o["allowedHosts"].filter((x): x is string => typeof x === "string");
+  }
+  if (o["plugins"] !== undefined) {
+    if (!Array.isArray(o["plugins"]) || o["plugins"].some((p) => typeof p !== "string")) {
+      throw new Error(`${path}: "plugins" must be an array of file paths.`);
+    }
+    config.plugins = o["plugins"] as string[];
   }
   if (o["waivers"] !== undefined) {
     if (!Array.isArray(o["waivers"])) throw new Error(`${path}: "waivers" must be an array.`);

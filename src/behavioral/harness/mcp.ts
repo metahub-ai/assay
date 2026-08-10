@@ -26,6 +26,9 @@
  */
 import { SandboxInfraError, type Sandbox } from "../../ports.js";
 import { makeSurface } from "../../surface.js";
+import { assessConformance } from "../mcp-observation.js";
+import type { McpObservation, McpToolAnnotation } from "../mcp-observation.js";
+import { detectTransport, MCP_HTTP_DRIVER_SOURCE } from "./transport.js";
 import type { EvalTestCase, Transcript } from "../types.js";
 import { installDependencies } from "../install.js";
 import type { LlmMessage, LlmProvider, LlmToolCall } from "../../ports.js";
@@ -55,6 +58,11 @@ interface DriverTool {
   name: string;
   description?: string;
   inputSchema?: Record<string, unknown>;
+  /** MCP tool annotations — the safety hints a client's approval UI
+   *  reads (readOnlyHint, destructiveHint, idempotentHint, openWorldHint,
+   *  title). Optional in the spec; captured so the truth-check can
+   *  cross-examine them. */
+  annotations?: Record<string, unknown>;
 }
 
 interface DriverCallResult {
@@ -64,12 +72,47 @@ interface DriverCallResult {
   error?: string;
 }
 
+interface DriverResource {
+  uri?: string;
+  name?: string;
+  mimeType?: string;
+}
+
+interface DriverPrompt {
+  name?: string;
+  description?: string;
+}
+
+interface DriverFrame {
+  dir: "in" | "out";
+  kind: "request" | "response" | "notification" | "server-request";
+  id?: number;
+  method?: string;
+  result?: string;
+  error?: string;
+}
+
 interface DriverOutput {
   ok: boolean;
   error?: string;
   initialize?: { protocolVersion?: string; serverInfo?: { name?: string; version?: string } };
   tools?: DriverTool[];
   calls?: DriverCallResult[];
+  /** resources/* surface, when the server implements it. */
+  resources?: DriverResource[];
+  resourceRead?: { uri?: string; ok: boolean };
+  /** prompts/* surface, when the server implements it. */
+  prompts?: DriverPrompt[];
+  promptGet?: { name?: string; ok: boolean };
+  /** Server -> client messages with no id (logging, progress, requests). */
+  notifications?: { method?: string; params?: string; serverRequest?: boolean }[];
+  /** The server's own stderr — logs, stack traces, echoed secrets. */
+  stderr?: string;
+  /** Bounded log of every JSON-RPC frame, both directions. */
+  frames?: DriverFrame[];
+  /** HTTP driver only: which transport ran and the endpoint it found. */
+  transport?: string;
+  endpoint?: string;
 }
 
 export interface McpHarnessInput {
@@ -90,6 +133,8 @@ export interface McpHarnessInput {
   test: EvalTestCase;
   /** Cap on how many tools to call. Defaults to EVAL_MCP_TOOL_CALL_CAP (5). */
   toolCallCap?: number;
+  /** Runtime-recorder wrapper for the driver invocations. */
+  traceWrap?: import("../types.js").TraceWrap;
 }
 
 /**
@@ -100,14 +145,25 @@ export interface McpHarnessInput {
  *   argv[2] = serverCmd            (required)
  *   argv[3] = path to calls.json   (optional)
  *
- * When argv[3] is omitted: do init + tools/list, print
- *   { ok, initialize, tools }
- * and exit.
+ * When argv[3] is omitted (phase 1, discovery): do init + tools/list,
+ * then probe the OPTIONAL surface — resources/list (+ read the first),
+ * prompts/list (+ get the first) — and ping the first tool. Prints
+ *   { ok, initialize, tools, resources?, resourceRead?, prompts?,
+ *     promptGet?, calls?, notifications?, stderr?, frames? }.
  *
  * When argv[3] is present and points at a JSON array of
  *   [{ name, arguments }, …]
- * the driver does init + replays the calls and prints
- *   { ok, initialize, tools, calls: [{ tool, arguments, result, error? }] }.
+ * the driver does init + replays the calls (phase 2) and prints
+ *   { ok, initialize, tools, calls: [{ tool, arguments, result, error? }],
+ *     notifications?, stderr?, frames? }.
+ *
+ * Beyond the tool catalog the driver captures, in BOTH phases: the
+ * server's own stderr (`stderr` — logs, stack traces, echoed secrets),
+ * every server -> client message with no matching request (`notifications`
+ * — logging/progress, and sampling/roots/elicitation requests flagged
+ * `serverRequest`), and a bounded log of every JSON-RPC frame in either
+ * direction (`frames`). Optional-capability probes use a tolerant send,
+ * so a tools-only server reports absence, never an error.
  *
  * The two-phase design lets the host LLM synthesize realistic
  * arguments from each tool's inputSchema between the two driver
@@ -124,11 +180,25 @@ if (!serverCmd) {
   process.exit(0);
 }
 
-const child = spawn("sh", ["-lc", serverCmd], { stdio: ["pipe", "pipe", "inherit"] });
+// stderr is PIPED, not inherited: a server's own logs are evidence
+// (secrets echoed, stack traces, "connecting to X") and used to be
+// thrown away into the parent's stderr.
+const child = spawn("sh", ["-lc", serverCmd], { stdio: ["pipe", "pipe", "pipe"] });
 
 let buf = "";
 const pending = new Map();
 let nextId = 1;
+const notifications = [];   // server -> client messages with no id
+const frames = [];          // every JSON-RPC frame, both directions, bounded
+let serverStderr = "";
+const MAX_FRAMES = 200, MAX_STDERR = 8192, MAX_PREVIEW = 300;
+function preview(v) {
+  try { const s = typeof v === "string" ? v : JSON.stringify(v); return s && s.length > MAX_PREVIEW ? s.slice(0, MAX_PREVIEW) + "..." : s; }
+  catch { return "<unserializable>"; }
+}
+function pushFrame(f) { if (frames.length < MAX_FRAMES) frames.push(f); }
+
+child.stderr.on("data", (c) => { if (serverStderr.length < MAX_STDERR) serverStderr += c.toString(); });
 
 child.stdout.on("data", (chunk) => {
   buf += chunk.toString();
@@ -140,9 +210,19 @@ child.stdout.on("data", (chunk) => {
     let msg;
     try { msg = JSON.parse(line); } catch { continue; }
     if (msg.id !== undefined && pending.has(msg.id)) {
+      pushFrame({ dir: "in", kind: "response", id: msg.id, ...(msg.error ? { error: preview(msg.error) } : { result: preview(msg.result) }) });
       const { resolve } = pending.get(msg.id);
       pending.delete(msg.id);
       resolve(msg);
+    } else if (msg.method !== undefined && msg.id === undefined) {
+      // server -> client notification (logging, progress, list-changed)
+      notifications.push({ method: msg.method, params: preview(msg.params) });
+      pushFrame({ dir: "in", kind: "notification", method: msg.method });
+    } else if (msg.method !== undefined && msg.id !== undefined) {
+      // server -> client REQUEST (sampling / roots / elicitation). We do
+      // not implement these; record that the server asked for one.
+      notifications.push({ method: msg.method, serverRequest: true });
+      pushFrame({ dir: "in", kind: "server-request", id: msg.id, method: msg.method });
     }
   }
 });
@@ -150,6 +230,7 @@ child.stdout.on("data", (chunk) => {
 function send(method, params, timeoutMs) {
   const id = nextId++;
   const payload = { jsonrpc: "2.0", id, method, params: params ?? {} };
+  pushFrame({ dir: "out", kind: "request", id, method });
   child.stdin.write(JSON.stringify(payload) + "\n");
   return new Promise((resolve, reject) => {
     const t = timeoutMs ?? 60000;
@@ -158,7 +239,17 @@ function send(method, params, timeoutMs) {
   });
 }
 
+// Tolerant send for OPTIONAL capabilities: a method-not-found (or any
+// error/timeout) resolves to null rather than throwing, so probing
+// resources/prompts on a server that implements only tools is a
+// capability observation, not a failure.
+async function trySend(method, params, timeoutMs) {
+  try { const res = await send(method, params, timeoutMs ?? 15000); return res && !res.error && res.result ? res.result : null; }
+  catch { return null; }
+}
+
 function notify(method, params) {
+  pushFrame({ dir: "out", kind: "notification", method });
   child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method, params: params ?? {} }) + "\n");
 }
 
@@ -183,9 +274,22 @@ async function main() {
     });
     out.initialize = initRes.result ?? {};
     notify("notifications/initialized");
-    const listRes = await send("tools/list", {});
-    const tools = (listRes.result && listRes.result.tools) || [];
-    out.tools = tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
+    // Paginate: a server with a large catalog returns tools/list in
+    // pages, each carrying a nextCursor. Reading only the first page
+    // truncated the catalog — the later tools (often the powerful ones a
+    // server buries) were never evaluated. Bounded to 20 pages so a
+    // server that echoes a stable cursor cannot spin the driver forever.
+    const tools = [];
+    let cursor = undefined;
+    for (let page = 0; page < 20; page++) {
+      const listRes = await send("tools/list", cursor ? { cursor } : {});
+      const pageTools = (listRes.result && listRes.result.tools) || [];
+      for (const t of pageTools) tools.push(t);
+      const next = listRes.result && listRes.result.nextCursor;
+      if (!next || next === cursor) break;
+      cursor = next;
+    }
+    out.tools = tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema, annotations: t.annotations }));
 
     const calls = readCalls();
     if (Array.isArray(calls)) {
@@ -205,16 +309,36 @@ async function main() {
           out.calls.push({ tool: name, arguments: args, error: String(err && err.message ? err.message : err) });
         }
       }
-    } else if (tools.length > 0 && callsPath === null) {
-      // No calls file passed — preserve the legacy "ping the first
-      // tool with empty args" behavior so callers that don't go
-      // through the two-phase flow still get a smoke signal.
-      const first = tools[0];
-      try {
-        const callRes = await send("tools/call", { name: first.name, arguments: {} });
-        out.calls = [{ tool: first.name, arguments: {}, result: callRes.result ?? callRes.error ?? null }];
-      } catch (err) {
-        out.calls = [{ tool: first.name, arguments: {}, error: String(err && err.message ? err.message : err) }];
+    } else if (callsPath === null) {
+      // Phase 1 discovery — enumerate the WHOLE protocol surface, not
+      // just tools. resources/* and prompts/* are optional, so a server
+      // that only does tools simply reports none.
+      const resList = await trySend("resources/list", {});
+      if (resList) {
+        out.resources = (resList.resources || []).map((r) => ({ uri: r.uri, name: r.name, mimeType: r.mimeType }));
+        if (out.resources.length > 0 && out.resources[0].uri) {
+          const read = await trySend("resources/read", { uri: out.resources[0].uri });
+          out.resourceRead = { uri: out.resources[0].uri, ok: !!read };
+        }
+      }
+      const promptList = await trySend("prompts/list", {});
+      if (promptList) {
+        out.prompts = (promptList.prompts || []).map((p) => ({ name: p.name, description: p.description }));
+        if (out.prompts.length > 0 && out.prompts[0].name) {
+          const got = await trySend("prompts/get", { name: out.prompts[0].name, arguments: {} });
+          out.promptGet = { name: out.prompts[0].name, ok: !!got };
+        }
+      }
+      // Legacy smoke: ping the first tool with empty args so a caller
+      // that never reaches phase 2 still gets a tool signal.
+      if (tools.length > 0) {
+        const first = tools[0];
+        try {
+          const callRes = await send("tools/call", { name: first.name, arguments: {} });
+          out.calls = [{ tool: first.name, arguments: {}, result: callRes.result ?? callRes.error ?? null }];
+        } catch (err) {
+          out.calls = [{ tool: first.name, arguments: {}, error: String(err && err.message ? err.message : err) }];
+        }
       }
     }
     out.ok = true;
@@ -222,6 +346,9 @@ async function main() {
     out.ok = false;
     out.error = String(err && err.message ? err.message : err);
   } finally {
+    if (notifications.length) out.notifications = notifications;
+    if (serverStderr) out.stderr = serverStderr.slice(0, MAX_STDERR);
+    if (frames.length) out.frames = frames;
     process.stdout.write(JSON.stringify(out) + "\n");
     child.kill("SIGKILL");
     process.exit(0);
@@ -467,6 +594,54 @@ function placeholderCredentialEnv(declared: string[]): Record<string, string> {
   return env;
 }
 
+/**
+ * Turn the driver's extra protocol observations (resources, prompts,
+ * notifications, server-initiated requests, and the server's own stderr)
+ * into transcript lines. Only the ones present are emitted, so a
+ * tools-only server adds nothing here. The server's stderr is included
+ * because it is genuine self-evidence — a stack trace, a "connecting
+ * to …" line, or a secret echoed to the log.
+ */
+function protocolMessages(out: DriverOutput): LlmMessage[] {
+  const msgs: LlmMessage[] = [];
+  if (out.resources) {
+    const names = out.resources.map((r) => r.uri ?? r.name ?? "?").slice(0, 12);
+    const read = out.resourceRead
+      ? ` · read ${out.resourceRead.uri ?? "?"} -> ${out.resourceRead.ok ? "ok" : "error"}`
+      : "";
+    msgs.push({ role: "tool", content: `resources/list: ${names.join(", ") || "(none)"}${read}` });
+  }
+  if (out.prompts) {
+    const names = out.prompts.map((p) => p.name ?? "?").slice(0, 12);
+    const got = out.promptGet
+      ? ` · get ${out.promptGet.name ?? "?"} -> ${out.promptGet.ok ? "ok" : "error"}`
+      : "";
+    msgs.push({ role: "tool", content: `prompts/list: ${names.join(", ") || "(none)"}${got}` });
+  }
+  if (out.notifications && out.notifications.length > 0) {
+    const notes = out.notifications.filter((n) => !n.serverRequest);
+    const reqs = out.notifications.filter((n) => n.serverRequest);
+    if (notes.length > 0) {
+      const methods = notes
+        .map((n) => n.method)
+        .filter(Boolean)
+        .slice(0, 8);
+      msgs.push({ role: "tool", content: `server notifications: ${methods.join(", ")}` });
+    }
+    if (reqs.length > 0) {
+      const methods = [...new Set(reqs.map((n) => n.method).filter(Boolean))];
+      msgs.push({
+        role: "tool",
+        content: `server->client requests (sampling/roots/elicitation): ${methods.join(", ")}`,
+      });
+    }
+  }
+  if (out.stderr && out.stderr.trim()) {
+    msgs.push({ role: "tool", content: `server stderr:\n${out.stderr.slice(0, 800)}` });
+  }
+  return msgs;
+}
+
 /** Drive the MCP server for one test case, capturing a real transcript. */
 export async function runMcpCase(input: McpHarnessInput): Promise<Transcript> {
   const { sandbox, test } = input;
@@ -482,6 +657,15 @@ export async function runMcpCase(input: McpHarnessInput): Promise<Transcript> {
 
   // 2) work out how to actually start the server.
   const serverCmd = input.serverCmd ?? (await resolveServerCommand(sandbox, cwd));
+
+  // 2b) Route by transport. An HTTP/Streamable-HTTP server binds a port
+  //     and never answers the stdio handshake — pointing the stdio driver
+  //     at it produced a bogus "server is dead" verdict. Detect it from
+  //     the entry source and drive it over HTTP instead.
+  if ((await detectServerTransport(sandbox, cwd, serverCmd)) === "http") {
+    return runHttpMcpCase(input, cwd, serverCmd, messages, start);
+  }
+
   const driverPath = driverPathFor(cwd);
 
   // 3) write the stdio JSON-RPC driver.
@@ -496,7 +680,10 @@ export async function runMcpCase(input: McpHarnessInput): Promise<Transcript> {
   // 4) Pass 1 — discovery. The driver does init + tools/list, prints
   //    the tool catalog, and exits. If no LLM is wired up (older
   //    tests), we degrade to the legacy "ping the first tool" output.
-  const pass1 = await sandbox.exec(`node ${driverPath} ${JSON.stringify(serverCmd)}`, {
+  //    Wrapped in the runtime recorder: the driver spawns the SERVER,
+  //    so strace -f from here captures the artifact's whole tree.
+  const pass1Cmd = `node ${driverPath} ${JSON.stringify(serverCmd)}`;
+  const pass1 = await sandbox.exec(input.traceWrap ? input.traceWrap(pass1Cmd) : pass1Cmd, {
     cwd,
     timeoutMs: 90_000,
     env: sandboxEnv,
@@ -560,6 +747,10 @@ export async function runMcpCase(input: McpHarnessInput): Promise<Transcript> {
     role: "tool",
     content: `tools/list: ${tools.map((t) => t.name).join(", ") || "(none)"}`,
   });
+  // The rest of the protocol surface, so the judge and the report see a
+  // server as more than its tools — resources, prompts, notifications,
+  // and its own stderr. Only emitted when there is something to say.
+  for (const m of protocolMessages(discovery)) messages.push(m);
   // What the server ACTUALLY returned, which may differ from what its
   // source declares. Recorded so cross-version diffing can compare
   // runtime surfaces rather than only source-level ones.
@@ -573,6 +764,11 @@ export async function runMcpCase(input: McpHarnessInput): Promise<Transcript> {
           })),
         )
       : undefined;
+
+  // Structured MCP observation: protocol conformance + the safety
+  // annotations, cross-examined downstream against descriptions and the
+  // runtime ledger.
+  const mcp = buildMcpObservation(discovery);
 
   // If no LLM was wired AND we already executed the legacy single
   // call in pass1, surface that and return.
@@ -593,6 +789,7 @@ export async function runMcpCase(input: McpHarnessInput): Promise<Transcript> {
       toolCalls,
       durationMs: Date.now() - start,
       ...(observedSurface ? { observedSurface } : {}),
+      mcp,
     };
   }
 
@@ -612,10 +809,12 @@ export async function runMcpCase(input: McpHarnessInput): Promise<Transcript> {
   //    results, exits.
   const callsPath = `${cwd.replace(/\/$/, "")}/mcp-calls.json`;
   await sandbox.writeFiles([{ path: callsPath, contents: JSON.stringify(synthesizedCalls) }]);
-  const pass2 = await sandbox.exec(
-    `node ${driverPath} ${JSON.stringify(serverCmd)} ${JSON.stringify(callsPath)}`,
-    { cwd, timeoutMs: 180_000, env: sandboxEnv },
-  );
+  const pass2Cmd = `node ${driverPath} ${JSON.stringify(serverCmd)} ${JSON.stringify(callsPath)}`;
+  const pass2 = await sandbox.exec(input.traceWrap ? input.traceWrap(pass2Cmd) : pass2Cmd, {
+    cwd,
+    timeoutMs: 180_000,
+    env: sandboxEnv,
+  });
   messages.push({
     role: "assistant",
     content: `driver pass2 exit=${pass2.exitCode}${pass2.timedOut ? " (timed out)" : ""}`,
@@ -643,11 +842,182 @@ export async function runMcpCase(input: McpHarnessInput): Promise<Transcript> {
       content: `MCP driver pass2 produced no parseable output: ${pass2.stderr || "(empty)"}`,
     });
   }
+  // Anything the server emitted WHILE serving the calls — a notification
+  // fired mid-request, a sampling/elicitation request back to the client,
+  // or a line on stderr — is behavior under load, so surface it too.
+  if (replay) for (const m of protocolMessages(replay)) messages.push(m);
 
   return {
     messages,
     toolCalls,
     durationMs: Date.now() - start,
     ...(observedSurface ? { observedSurface } : {}),
+    mcp,
+  };
+}
+
+/**
+ * Derive the structured MCP observation (conformance + tool annotations)
+ * from a discovery-pass driver output. Pure; the scoring lives in
+ * mcp-observation.ts so it is tested without a sandbox.
+ */
+function buildMcpObservation(out: DriverOutput): McpObservation {
+  const bool = (v: unknown) => (typeof v === "boolean" ? v : undefined);
+  const annotated: McpToolAnnotation[] = (out.tools ?? []).map((t) => {
+    const a = (t.annotations ?? {}) as Record<string, unknown>;
+    return {
+      name: t.name,
+      ...(t.description !== undefined ? { description: t.description } : {}),
+      readOnlyHint: bool(a["readOnlyHint"]),
+      destructiveHint: bool(a["destructiveHint"]),
+      idempotentHint: bool(a["idempotentHint"]),
+      openWorldHint: bool(a["openWorldHint"]),
+      ...(typeof a["title"] === "string" ? { title: a["title"] as string } : {}),
+      hasInputSchema:
+        t.inputSchema !== undefined && t.inputSchema !== null && typeof t.inputSchema === "object",
+    };
+  });
+  const conformance = assessConformance({
+    ...(out.initialize ? { initialize: out.initialize } : {}),
+    tools: annotated.map((t) => ({ name: t.name, hasInputSchema: t.hasInputSchema })),
+    hasResources: (out.resources?.length ?? 0) > 0,
+    hasPrompts: (out.prompts?.length ?? 0) > 0,
+  });
+  return { conformance, tools: annotated };
+}
+
+/**
+ * Classify the server's transport from its entry source. Best-effort:
+ * unreadable files or an unrecognized shape default to stdio (the safe,
+ * common path).
+ */
+async function detectServerTransport(
+  sandbox: Sandbox,
+  cwd: string,
+  serverCmd: string,
+): Promise<"stdio" | "http"> {
+  const m = /node\s+(?:"([^"]+)"|'([^']+)'|(\S+))/.exec(serverCmd);
+  const entry = m ? m[1] || m[2] || m[3] : null;
+  const candidates = [
+    entry,
+    "index.js",
+    "index.mjs",
+    "server.js",
+    "src/index.js",
+    "dist/index.js",
+    "main.py",
+    "server.py",
+  ].filter((p): p is string => Boolean(p));
+  const base = cwd.replace(/\/+$/, "");
+  const files: { path: string; body: string }[] = [];
+  const seen = new Set<string>();
+  for (const p of candidates) {
+    if (seen.has(p)) continue;
+    seen.add(p);
+    const abs = p.startsWith("/") ? p : `${base}/${p}`;
+    const body = await sandbox.readFile(abs).catch(() => null);
+    if (body) files.push({ path: p, body });
+    if (files.length >= 4) break;
+  }
+  return detectTransport(files);
+}
+
+/**
+ * Drive an HTTP/Streamable-HTTP MCP server. Single discovery pass
+ * (initialize + tools/list + a first tool ping) — enough to capture the
+ * surface, conformance and annotations; the two-pass LLM replay stays a
+ * stdio feature for now. Reuses every downstream helper, so the
+ * transcript, observation and ledger are identical in shape.
+ */
+async function runHttpMcpCase(
+  input: McpHarnessInput,
+  cwd: string,
+  serverCmd: string,
+  messages: LlmMessage[],
+  start: number,
+): Promise<Transcript> {
+  const { sandbox } = input;
+  const toolCalls: LlmToolCall[] = [];
+  const driverPath = `${cwd.replace(/\/+$/, "")}/mcp-http-driver.mjs`;
+  await sandbox.writeFiles([{ path: driverPath, contents: MCP_HTTP_DRIVER_SOURCE }]);
+
+  const declared = await declaredEnvVars(sandbox, cwd);
+  const env = placeholderCredentialEnv(declared);
+  const port = "3939";
+  const cmd = `node ${driverPath} ${JSON.stringify(serverCmd)} ${port}`;
+  const run = await sandbox.exec(input.traceWrap ? input.traceWrap(cmd) : cmd, {
+    cwd,
+    timeoutMs: 120_000,
+    env,
+  });
+  messages.push({
+    role: "assistant",
+    content: `HTTP driver exit=${run.exitCode}${run.timedOut ? " (timed out)" : ""}`,
+  });
+
+  const discovery = parseDriverOutput(run.stdout);
+  if (!discovery || !discovery.ok) {
+    const detail = discovery?.error || run.stderr || "no parseable output";
+    // Same infra-vs-artifact honesty as stdio: a server that never opened
+    // a port under placeholder credentials told us nothing about itself.
+    if (run.timedOut || /did not open a port|no MCP endpoint/.test(discovery?.error ?? "")) {
+      throw new SandboxInfraError(
+        `MCP HTTP server did not become reachable (${detail}). ` +
+          `This is an environment failure, not an artifact defect — it may need real ` +
+          `credentials, a fixed port, or an endpoint path the driver did not try.`,
+      );
+    }
+    messages.push({ role: "tool", content: `MCP HTTP driver failed during discovery: ${detail}` });
+    return { messages, toolCalls, durationMs: Date.now() - start };
+  }
+
+  messages.push({
+    role: "tool",
+    content: `transport: streamable-http (endpoint ${discovery.endpoint ?? "?"})`,
+  });
+  if (discovery.initialize) {
+    const name = discovery.initialize.serverInfo?.name ?? "(unknown)";
+    messages.push({
+      role: "tool",
+      content: `initialize: server=${name} protocol=${discovery.initialize.protocolVersion ?? "?"}`,
+    });
+  }
+  const tools = discovery.tools ?? [];
+  messages.push({
+    role: "tool",
+    content: `tools/list: ${tools.map((t) => t.name).join(", ") || "(none)"}`,
+  });
+  for (const m of protocolMessages(discovery)) messages.push(m);
+
+  const observedSurface =
+    tools.length > 0
+      ? makeSurface(
+          "observed",
+          tools.map((t) => ({
+            name: t.name,
+            ...(t.description !== undefined ? { description: t.description } : {}),
+          })),
+        )
+      : undefined;
+  const mcp = buildMcpObservation(discovery);
+
+  for (const c of discovery.calls ?? []) {
+    toolCalls.push({
+      id: `mcp_call_${toolCalls.length + 1}`,
+      name: c.tool,
+      input: c.arguments ?? {},
+    });
+    messages.push({
+      role: "tool",
+      content: `tools/call ${c.tool}: ${JSON.stringify(c.result ?? c.error ?? null).slice(0, 300)}`,
+    });
+  }
+
+  return {
+    messages,
+    toolCalls,
+    durationMs: Date.now() - start,
+    ...(observedSurface ? { observedSurface } : {}),
+    mcp,
   };
 }

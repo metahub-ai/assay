@@ -25,6 +25,8 @@ export interface AgentHarnessInput {
    * common conventions, the first of which exists is used.
    */
   entryFile?: string;
+  /** Runtime-recorder wrapper for the agent invocation. */
+  traceWrap?: import("../types.js").TraceWrap;
   test: EvalTestCase;
 }
 
@@ -82,7 +84,8 @@ export async function runAgentCase(input: AgentHarnessInput): Promise<Transcript
     name: "run_agent",
     input: { cmd, entry, prompt: test.prompt },
   });
-  const run = await sandbox.exec(`printf '%s' ${JSON.stringify(test.prompt)} | ${cmd}`, {
+  const fullCmd = `printf '%s' ${JSON.stringify(test.prompt)} | ${cmd}`;
+  const run = await sandbox.exec(input.traceWrap ? input.traceWrap(fullCmd) : fullCmd, {
     cwd,
     timeoutMs: 120_000,
   });

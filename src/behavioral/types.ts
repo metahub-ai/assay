@@ -10,6 +10,14 @@
 import type { ArtifactKind } from "../types.js";
 import type { LlmMessage, LlmToolCall } from "../ports.js";
 
+/**
+ * Wraps an artifact-executing shell command with the runtime recorder
+ * (strace). Provided by the orchestrator's capture handle; harnesses
+ * apply it to the commands that RUN the artifact — not to their own
+ * bookkeeping execs, which would only add noise to the ledger.
+ */
+export type TraceWrap = (cmd: string) => string;
+
 /** A single behavioral test case fed to a harness. */
 export interface EvalTestCase {
   id: string;
@@ -45,6 +53,12 @@ export interface Transcript {
    * the one static analysis structurally cannot see.
    */
   observedSurface?: import("../surface.js").ToolSurface;
+  /**
+   * MCP-only structured observations: protocol conformance and the tool
+   * safety annotations, derived from the JSON-RPC handshake and catalog.
+   * Absent for every other kind.
+   */
+  mcp?: import("./mcp-observation.js").McpObservation;
 }
 
 /** The dimensions the judge scores each transcript on. */
@@ -117,6 +131,27 @@ export interface BehavioralEvalResult {
    * catalog-wide projection by exactly the failures.
    */
   usage?: import("../metering.js").UsageReport;
+  /**
+   * Ground-truth runtime behavior (network connections, DNS, file
+   * access outside the workspace, spawned processes) captured by
+   * tcpdump + strace inside the sandbox. Absent when capture was
+   * disabled; `captured` says which halves actually ran.
+   */
+  runtime?: import("./ledger.js").RuntimeLedger;
+  /** The declared-vs-observed diff over `runtime`. */
+  runtimeAnalysis?: import("./ledger.js").LedgerAnalysis;
+  /**
+   * MCP-only: protocol conformance verdict + tool safety annotations,
+   * carried from the handshake so the report can score conformance and
+   * cross-examine the annotations. Absent for other kinds.
+   */
+  mcp?: import("./mcp-observation.js").McpObservation;
+  /**
+   * Skill-only, when uplift measurement was requested: how the skill
+   * scored vs. the bare model on the same cases and rubric. `delta` is
+   * the value the skill adds, on the 0–10 scale.
+   */
+  uplift?: { withSkill: number; baseline: number; delta: number; n: number };
   generatedAt: string;
   /**
    * Set when the run couldn't complete (provider failure, sandbox

@@ -17,8 +17,31 @@
 import { defineCheck } from "../../check.js";
 import type { CheckResult } from "../../types.js";
 import { findAgentMarkdown } from "../docs-resolution.js";
-import { AGENT_MANIFESTS, countWords, parseFrontmatter, readManifest } from "../manifest.js";
+import {
+  AGENT_MANIFESTS,
+  countWords,
+  parseFrontmatter,
+  parseList,
+  readManifest,
+} from "../manifest.js";
 import { checkSpecUrl } from "../../version.js";
+
+/** Tools that grant real blast radius — a shell, a writer, or the network.
+ *  Declared explicitly is fine; an installer just deserves to SEE them. */
+const ELEVATED_TOOLS = new Set([
+  "bash",
+  "write",
+  "edit",
+  "multiedit",
+  "execute",
+  "webfetch",
+  "websearch",
+  "notebookedit",
+]);
+
+function elevatedIn(tools: string[]): string[] {
+  return tools.filter((t) => ELEVATED_TOOLS.has(t.toLowerCase().trim()));
+}
 
 // Detection lives in one place (../docs-resolution) so `manifest-present`
 // and `agent-shape-declared` cannot drift apart again — they disagreed
@@ -144,29 +167,62 @@ export const agentToolScope = defineCheck({
     const prompt = await findAgentMarkdown(ctx.source);
     if (prompt) {
       const raw = (await ctx.source.readFile(prompt)) ?? "";
-      const tools = parseFrontmatter(raw).fields["tools"];
-      return tools
-        ? { status: "pass", summary: "Declares a tool scope in frontmatter." }
-        : {
-            status: "warn",
-            summary: "No tool scope declared.",
-            detail: "The agent inherits whatever the client grants — the broadest possible scope.",
-            remediation: "Declare `tools:` in the frontmatter with the minimum set needed.",
-            evidence: [{ type: "file", path: prompt }],
-          };
+      const rawTools = parseFrontmatter(raw).fields["tools"];
+      if (rawTools === undefined) {
+        return {
+          status: "warn",
+          summary: "No tool scope declared.",
+          detail: "The agent inherits whatever the client grants — the broadest possible scope.",
+          remediation: "Declare `tools:` in the frontmatter with the minimum set needed.",
+          evidence: [{ type: "file", path: prompt }],
+        };
+      }
+      return scopeResult(parseList(rawTools), prompt);
     }
     const manifest = await readManifest(ctx.source, AGENT_MANIFESTS);
     const tools = manifest?.data?.["tools"];
     if (Array.isArray(tools) && tools.length > 0) {
-      return { status: "pass", summary: `Declares ${tools.length} tools.` };
+      return scopeResult(
+        tools.filter((t): t is string => typeof t === "string"),
+        manifest!.path,
+      );
     }
     return {
       status: "warn",
       summary: "No tool scope declared.",
+      detail: "The agent inherits whatever the client grants — the broadest possible scope.",
       remediation: 'Add a "tools" array to agent.json.',
       evidence: manifest ? [{ type: "file", path: manifest.path }] : [],
     };
   },
 });
+
+/**
+ * Grade a declared tool scope. An explicit scope is good; elevated tools
+ * in it are surfaced, never penalized — an agent that legitimately needs
+ * a shell should not score below one that needs none, but a consumer is
+ * entitled to see the blast radius before installing.
+ */
+function scopeResult(tools: string[], path: string): CheckResult {
+  if (tools.length === 0) {
+    return {
+      status: "pass",
+      summary: "Declares an empty tool scope — needs no tools at all.",
+      detail: "The tightest scope an agent can declare, and stated explicitly.",
+      evidence: [{ type: "file", path }],
+    };
+  }
+  const elevated = elevatedIn(tools);
+  if (elevated.length > 0) {
+    return {
+      status: "pass",
+      summary: `Declares ${tools.length} tool${tools.length === 1 ? "" : "s"}, including elevated: ${elevated.join(", ")}.`,
+      detail:
+        "Declared explicitly, which is what we want — surfaced here so a consumer can see the blast radius (a shell, a file writer, or the network) before installing.",
+      evidence: [{ type: "file", path }],
+    };
+  }
+  return { status: "pass", summary: `Declares ${tools.length} tool scope entries.` };
+}
 
 export const AGENT_CHECKS = [agentShapeDeclared, agentInstructions, agentToolScope];

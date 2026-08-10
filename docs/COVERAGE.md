@@ -1,6 +1,6 @@
 # Assay — coverage and gaps
 
-**As of 2026-08-02 · assay 0.1.0 · suite `assay-default`**
+**As of 2026-08-08 · assay 0.2.0 · suite `assay-default`**
 
 This document exists because the single highest-credibility artifact found
 anywhere in the competitive research was OpenSSF Scorecard's own published
@@ -15,14 +15,15 @@ cannot.
 
 ## 1. Headline numbers
 
-|                                          | Count                        |
-| ---------------------------------------- | ---------------------------- |
-| Checks in the default suite              | **35** static + 1 behavioral |
-| Checks producing a scored verdict        | **32**                       |
-| Checks that are informational (weight 0) | 3                            |
-| Checks that are blocking                 | **10**                       |
-| Score axes with working coverage         | **4 of 4**                   |
-| Tests                                    | **832**                      |
+|                                          | Count                                                   |
+| ---------------------------------------- | ------------------------------------------------------- |
+| Checks in the default suite              | **54** static + 1 behavioral                            |
+| Checks producing a scored verdict        | **51**                                                  |
+| Checks that are informational (weight 0) | 3                                                       |
+| Checks that are blocking                 | **24**                                                  |
+| Adversarial probes (per kind)            | **44** total (skill 10 · mcp 11 · agent 12 · plugin 11) |
+| Score axes with working coverage         | **4 of 4**                                              |
+| Tests                                    | **1267**                                                |
 
 Statement coverage 86.1% · functions 89.9% · lines 87.5% · branches 75.1%.
 Measured, not asserted — reproduce with `npm run test:coverage`.
@@ -89,16 +90,26 @@ piece, and it is listed in §6.
 
 ## 2. Coverage by axis
 
-| Axis          | Checks | Notes                                                                           |
-| ------------- | ------ | ------------------------------------------------------------------------------- |
-| **integrity** | 12     | Manifest, identity, entry resolution, per-kind well-formedness                  |
-| **safety**    | 11     | File contents, credential leaks, install scripts, dependency bounds, tool scope |
-| **care**      | 12     | Description quality, docs, body substance, maintenance signals                  |
-| **behavior**  | 1      | The behavioral engine, via `createBehavioralCheck`                              |
+| Axis          | Checks | Notes                                                                                                   |
+| ------------- | ------ | ------------------------------------------------------------------------------------------------------- |
+| **integrity** | 14     | Manifest, identity, entry resolution, per-kind well-formedness                                                          |
+| **safety**    | 26     | Credential leaks, undeclared egress, obfuscation, injection/tool-poisoning, hostile instructions, plugin hooks, auth posture, typosquats |
+| **care**      | 14     | Description quality, docs, body substance, token cost, maintenance signals                                              |
+| **behavior**  | 1      | The behavioral engine, via `createBehavioralCheck`                                                                      |
 
 All four axes now produce real verdicts. Note that `behavior` is a single
-_check_ backed by an entire engine — four kind-specific harnesses, a judge, and
-an adversarial probe corpus — not a single assertion.
+_check_ backed by an entire engine — four kind-specific harnesses (stdio AND
+Streamable-HTTP for MCP), a judge, an adversarial probe corpus (44 probes),
+and a **runtime behavior ledger** (packet
+capture + strace: observed network connections, DNS, out-of-workspace file
+access, and spawned processes, diffed against what the artifact declares) — not
+a single assertion.
+
+The one honest npm-provenance follow-up: an npm/registry integrity hash is
+base64 sha512, which the report's `tarball` subject variant (a hex sha256) can't
+carry without mislabeling, so those targets still record `directory`. Git
+targets record their resolved commit. A schema field for the verbatim registry
+integrity is the fix.
 
 ---
 
@@ -113,7 +124,7 @@ an adversarial probe corpus — not a single assertion.
 | Content-addressed subject digest                                                               | **Working** — transport-independent Merkle fold                                           |
 | Four-axis scoring with coverage + floors                                                       | **Working**                                                                               |
 | Shelf life and retraction tombstones                                                           | **Working**                                                                               |
-| Static check catalog (43 checks, 4 kinds)                                                      | **Working**                                                                               |
+| Static check catalog (53 checks, 4 kinds)                                                      | **Working**                                                                               |
 | Behavioral engine (4 harnesses, judge, probes)                                                 | **Working** — exercised against in-memory fakes in CI, and against real artifacts by hand |
 | Transcript recording + digesting                                                               | **Working**                                                                               |
 | **Transcript publication** (`FileTranscriptSink`)                                              | **Working** — content-addressed, self-sufficient records                                  |

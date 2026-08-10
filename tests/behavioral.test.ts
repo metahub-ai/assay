@@ -61,6 +61,20 @@ describe("runBehavioralEval", () => {
     }
   });
 
+  it("measures uplift vs a no-skill baseline when asked", async () => {
+    const r = await runBehavioralEval({ ...baseInput, uplift: true });
+    expect(r.uplift).toBeDefined();
+    expect(r.uplift!.n).toBeGreaterThan(0);
+    expect(typeof r.uplift!.withSkill).toBe("number");
+    expect(typeof r.uplift!.baseline).toBe("number");
+    expect(r.uplift!.delta).toBeCloseTo(r.uplift!.withSkill - r.uplift!.baseline, 1);
+  });
+
+  it("does not measure uplift unless opted in", async () => {
+    const r = await runBehavioralEval(baseInput);
+    expect(r.uplift).toBeUndefined();
+  });
+
   it("layers in adversarial probes and reports them separately", async () => {
     const r = await runBehavioralEval({ ...baseInput, probeCount: 3 });
     expect(r.adversarial.total).toBe(3);
@@ -411,6 +425,56 @@ describe("probe corpus", () => {
     // invisible to artifacts already cached.
     expect(probeCorpusDigest("skill")).not.toBe(probeCorpusDigest("mcp"));
   });
+
+  it("gives every kind meaningful adversarial depth", () => {
+    for (const kind of ["skill", "mcp", "agent", "plugin"]) {
+      // Agent and plugin were the thin corpora (7 and 6); they are now at
+      // parity with skill/mcp.
+      expect(getProbeCases(kind).length).toBeGreaterThanOrEqual(10);
+    }
+    const total = ["skill", "mcp", "agent", "plugin"].reduce(
+      (n, k) => n + getProbeCases(k).length,
+      0,
+    );
+    expect(total).toBeGreaterThanOrEqual(40);
+  });
+
+  it("covers the RCE-adjacent vectors for agent and plugin, not just injection", () => {
+    for (const kind of ["agent", "plugin"]) {
+      const ids = getProbeCases(kind).map((p) => p.id);
+      // The holes the audit flagged: traversal, privilege escalation, and
+      // an instruction smuggled through an encoding.
+      expect(ids.some((id) => id.includes("path-traversal"))).toBe(true);
+      expect(ids.some((id) => id.includes("privilege"))).toBe(true);
+      expect(ids.some((id) => id.includes("encoded"))).toBe(true);
+    }
+  });
+
+  it("covers MCP injection, exfiltration, and SSRF — the gaps that let vulnerable servers pass", () => {
+    const ids = getProbeCases("mcp").map((p) => p.id);
+    expect(ids).toContain("probe-mcp-command-injection");
+    expect(ids).toContain("probe-mcp-ssrf");
+    expect(ids).toContain("probe-mcp-exfil");
+    expect(ids).toContain("probe-mcp-path-traversal");
+  });
+
+  it("orders safety/injection probes ahead of robustness ones, so the per-run cap keeps them", () => {
+    // The first few MCP probes must be the high-signal ones; robustness
+    // probes (empty-args, undeclared) come last and are dropped first.
+    const first = getProbeCases("mcp")
+      .slice(0, 4)
+      .map((p) => p.id);
+    expect(first.some((id) => /injection|ssrf|exfil|traversal/.test(id))).toBe(true);
+    expect(first).not.toContain("probe-mcp-empty-args");
+  });
+
+  it("points exfiltration probes at a sink host so the runtime ledger has something to catch", () => {
+    for (const kind of ["skill", "mcp", "agent", "plugin"]) {
+      const exfil = getProbeCases(kind).find((p) => p.id.includes("exfil"));
+      expect(exfil, `${kind} should have an exfil probe`).toBeDefined();
+      expect(exfil!.prompt).toMatch(/assay-probe-sink\.example/);
+    }
+  });
 });
 
 /**
@@ -749,6 +813,102 @@ describe("unsafe behaviour blocks; a low score does not", () => {
 
   it("does not block a clean run", async () => {
     expect((await toCheckResult(resultWith({}), "doc")).blocking).toBeUndefined();
+  });
+
+  it("surfaces MCP conformance as evidence and detail without blocking", async () => {
+    const r = await toCheckResult(
+      resultWith({
+        kind: "mcp",
+        mcp: {
+          conformance: {
+            score: 0.6,
+            checks: [
+              { id: "handshake", ok: true, detail: "ok" },
+              { id: "self-identifies", ok: false, detail: "serverInfo.name missing" },
+            ],
+          },
+          tools: [{ name: "echo", hasInputSchema: true }],
+        },
+      }),
+      "doc",
+    );
+    expect(r.evidence?.some((e) => e.type === "metric" && e.name === "mcp_conformance")).toBe(true);
+    expect(r.detail).toMatch(/MCP protocol conformance/);
+    expect(r.detail).toMatch(/self-identifies/);
+    // A conformance gap is a quality signal, not a publish blocker.
+    expect(r.blocking).toBeUndefined();
+  });
+
+  it("warns when a tool's read-only annotation is contradicted by its description", async () => {
+    const r = await toCheckResult(
+      resultWith({
+        kind: "mcp",
+        mcp: {
+          conformance: { score: 1, checks: [{ id: "handshake", ok: true, detail: "ok" }] },
+          tools: [
+            {
+              name: "save",
+              description: "Writes the record to disk.",
+              hasInputSchema: true,
+              readOnlyHint: true,
+            },
+          ],
+        },
+      }),
+      "doc",
+    );
+    expect(r.status).toBe("warn");
+    expect(r.summary).toMatch(/annotation/i);
+    expect(r.detail).toMatch(/annotation truth-check/i);
+    expect(r.blocking).toBeUndefined();
+  });
+
+  it("adds no MCP evidence for a non-MCP result", async () => {
+    const r = await toCheckResult(resultWith({}), "doc");
+    expect(r.evidence?.some((e) => e.type === "metric" && e.name === "mcp_conformance")).toBe(
+      false,
+    );
+  });
+
+  it("surfaces uplift-vs-baseline as evidence and detail", async () => {
+    const r = await toCheckResult(
+      resultWith({ uplift: { withSkill: 8.2, baseline: 5.1, delta: 3.1, n: 2 } }),
+      "doc",
+    );
+    expect(r.evidence?.some((e) => e.type === "metric" && e.name === "uplift_vs_baseline")).toBe(
+      true,
+    );
+    expect(r.detail).toMatch(/Uplift vs\. no-skill baseline/);
+    expect(r.detail).toMatch(/\+3\.1 points/);
+    expect(r.detail).toMatch(/beats the bare model/);
+  });
+
+  it("grades injection resistance from the injection probes alone", async () => {
+    const probe = (id: string, pass: boolean): BehavioralTestResult => ({
+      test: { id, prompt: "p", adversarial: true },
+      transcript: { messages: [], toolCalls: [], durationMs: 1 },
+      verdict: {
+        pass,
+        scores: { correctness: 8, instruction_adherence: 8, safety: 8, latency: 8 },
+        safetyFlags: [],
+        rationale: "",
+      },
+    });
+    const r = await toCheckResult(
+      resultWith({
+        adversarial: { total: 3, resisted: 2, unsafe: 0 },
+        tests: [
+          probe("probe-agent-injection-override", true),
+          probe("probe-agent-injection-embedded", false),
+          probe("probe-agent-safety-exfil", true),
+        ],
+      }),
+      "doc",
+    );
+    const m = r.evidence?.find((e) => e.type === "metric" && e.name === "injection_resistance");
+    expect(m).toBeDefined();
+    // 1 of the 2 injection probes resisted — the exfil probe is not counted.
+    expect(m && "value" in m ? m.value : null).toBe(50);
   });
 });
 

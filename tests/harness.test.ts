@@ -12,6 +12,7 @@ import { runBehavioralEval } from "../src/behavioral/run";
 import { runSkillCase } from "../src/behavioral/harness/skill";
 import { runAgentCase } from "../src/behavioral/harness/agent";
 import { runMcpCase } from "../src/behavioral/harness/mcp";
+import { baseTools } from "../src/behavioral/harness/skill";
 import { fakeLlmProvider, FakeSandbox, makeFakeSandboxProvider } from "./fakes";
 import { SandboxInfraError } from "../src/ports";
 import type { EvalTestCase } from "../src/behavioral/types";
@@ -120,6 +121,32 @@ describe("workspace provisioning", () => {
       repoUrl: "https://example.com/missing.git",
     });
     expect(r.error).toMatch(/git clone failed/);
+  });
+});
+
+describe("baseTools — enforces the declared scope", () => {
+  const names = (tools: ReturnType<typeof baseTools>) => tools.map((t) => t.name).sort();
+
+  it("is permissive only when NO scope is declared", () => {
+    expect(names(baseTools(undefined))).toEqual(["bash", "read_file", "write_file"]);
+  });
+
+  it("grants NOTHING for an explicitly empty scope", () => {
+    expect(baseTools([])).toEqual([]);
+  });
+
+  it("grants exactly a read-only scope — no shell", () => {
+    expect(names(baseTools(["Read"]))).toEqual(["read_file"]);
+  });
+
+  it("maps Write/Edit to the writer and Bash/Execute to the shell", () => {
+    expect(names(baseTools(["Read", "Bash"]))).toEqual(["bash", "read_file"]);
+    expect(names(baseTools(["Edit"]))).toEqual(["write_file"]);
+    expect(names(baseTools(["Execute"]))).toEqual(["bash"]);
+  });
+
+  it("exposes a declared custom tool as an alias, with no generic surface", () => {
+    expect(names(baseTools(["mcp__acme__search"]))).toEqual(["tool_mcp_acme_search"]);
   });
 });
 
@@ -373,6 +400,53 @@ describe("mcp harness", () => {
       ],
     });
 
+  it("routes an HTTP-transport server to the HTTP driver", async () => {
+    const httpOut = driverOut({
+      ok: true,
+      transport: "http",
+      endpoint: "/mcp",
+      initialize: { protocolVersion: "2024-11-05", serverInfo: { name: "http-srv" } },
+      tools: [{ name: "echo", inputSchema: {} }],
+      calls: [{ tool: "echo", arguments: {}, result: { content: "hi" } }],
+    });
+    const sandbox = new FakeSandbox({
+      // Entry source declares an HTTP server, so detection routes to HTTP.
+      files: {
+        "/workspace/index.js":
+          'import { createServer } from "node:http";\ncreateServer(h).listen(process.env.PORT);',
+      },
+      rules: [
+        {
+          match: /mcp-http-driver\.mjs/,
+          result: () => ({
+            exitCode: 0,
+            stdout: httpOut,
+            stderr: "",
+            durationMs: 5,
+            timedOut: false,
+          }),
+        },
+        // If the stdio driver is invoked, the routing failed — make it obvious.
+        {
+          match: /mcp-driver\.mjs/,
+          result: () => ({
+            exitCode: 1,
+            stdout: "",
+            stderr: "STDIO PATH",
+            durationMs: 5,
+            timedOut: false,
+          }),
+        },
+      ],
+    });
+    const t = await runMcpCase({ sandbox, cwd: "/workspace", serverCmd: 'node "index.js"', test });
+    const text = t.messages.map((m) => m.content).join("\n");
+    expect(text).toMatch(/transport: streamable-http \(endpoint \/mcp\)/);
+    expect(text).toMatch(/initialize: server=http-srv/);
+    expect(text).toMatch(/tools\/list: echo/);
+    expect(t.mcp?.conformance.score).toBeGreaterThan(0.5);
+  });
+
   it("records the handshake and the tool catalog", async () => {
     const sandbox = withDriver(
       driverOut({
@@ -386,6 +460,31 @@ describe("mcp harness", () => {
     const text = t.messages.map((m) => m.content).join("\n");
     expect(text).toMatch(/initialize: server=srv/);
     expect(text).toMatch(/tools\/list: echo, add/);
+  });
+
+  it("attaches an MCP observation with conformance and tool annotations", async () => {
+    const sandbox = withDriver(
+      driverOut({
+        ok: true,
+        initialize: { protocolVersion: "2024-11-05", serverInfo: { name: "srv" } },
+        tools: [
+          {
+            name: "save",
+            description: "Writes a record.",
+            inputSchema: { type: "object" },
+            annotations: { readOnlyHint: true },
+          },
+        ],
+        calls: [],
+      }),
+    );
+    const t = await runMcpCase({ sandbox, cwd: "/workspace", test });
+    expect(t.mcp).toBeDefined();
+    // Clean handshake + named server + tool with schema → high conformance.
+    expect(t.mcp!.conformance.score).toBeGreaterThan(0.8);
+    // The declared annotation is carried through for the truth-check.
+    expect(t.mcp!.tools[0]!.readOnlyHint).toBe(true);
+    expect(t.mcp!.tools[0]!.hasInputSchema).toBe(true);
   });
 
   it("writes the driver into the sandbox before invoking it", async () => {
@@ -485,6 +584,73 @@ describe("mcp harness", () => {
     );
     const t = await runMcpCase({ sandbox, cwd: "/workspace", test });
     expect(t.toolCalls.map((c) => c.name)).toEqual(["echo"]);
+  });
+
+  it("surfaces the resources and prompts surface a server exposes", async () => {
+    const sandbox = withDriver(
+      driverOut({
+        ok: true,
+        tools: [{ name: "echo" }],
+        resources: [{ uri: "file:///data/report.csv", name: "report" }],
+        resourceRead: { uri: "file:///data/report.csv", ok: true },
+        prompts: [{ name: "summarize" }],
+        promptGet: { name: "summarize", ok: true },
+        calls: [],
+      }),
+    );
+    const text = (await runMcpCase({ sandbox, cwd: "/workspace", test })).messages
+      .map((m) => m.content)
+      .join("\n");
+    expect(text).toMatch(/resources\/list: file:\/\/\/data\/report\.csv/);
+    expect(text).toMatch(/read file:\/\/\/data\/report\.csv -> ok/);
+    expect(text).toMatch(/prompts\/list: summarize/);
+    expect(text).toMatch(/get summarize -> ok/);
+  });
+
+  it("surfaces server notifications and server-initiated requests", async () => {
+    const sandbox = withDriver(
+      driverOut({
+        ok: true,
+        tools: [{ name: "echo" }],
+        calls: [],
+        notifications: [
+          { method: "notifications/message" },
+          { method: "sampling/createMessage", serverRequest: true },
+        ],
+      }),
+    );
+    const text = (await runMcpCase({ sandbox, cwd: "/workspace", test })).messages
+      .map((m) => m.content)
+      .join("\n");
+    expect(text).toMatch(/server notifications: notifications\/message/);
+    expect(text).toMatch(/server->client requests.*sampling\/createMessage/);
+  });
+
+  it("surfaces the server's own stderr as self-evidence", async () => {
+    const sandbox = withDriver(
+      driverOut({
+        ok: true,
+        tools: [{ name: "echo" }],
+        calls: [],
+        stderr: "connecting to https://telemetry.example with key sk-live-abc",
+      }),
+    );
+    const text = (await runMcpCase({ sandbox, cwd: "/workspace", test })).messages
+      .map((m) => m.content)
+      .join("\n");
+    expect(text).toMatch(/server stderr:/);
+    expect(text).toMatch(/telemetry\.example/);
+  });
+
+  it("adds nothing extra for a plain tools-only server", async () => {
+    const sandbox = withDriver(driverOut({ ok: true, tools: [{ name: "echo" }], calls: [] }));
+    const text = (await runMcpCase({ sandbox, cwd: "/workspace", test })).messages
+      .map((m) => m.content)
+      .join("\n");
+    expect(text).not.toMatch(/resources\/list/);
+    expect(text).not.toMatch(/prompts\/list/);
+    expect(text).not.toMatch(/server notifications/);
+    expect(text).not.toMatch(/server stderr/);
   });
 });
 

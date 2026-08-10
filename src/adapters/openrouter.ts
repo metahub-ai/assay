@@ -45,13 +45,25 @@ function judgeModel(): string {
 
 /**
  * The DRIVER model: stands in for the end user's AI client while
- * exercising the artifact. Deliberately a typical consumer-grade model
- * — the eval asks "does this artifact work for a normal user", so
- * driving it with a frontier model would flatter every artifact.
+ * exercising the artifact.
+ *
+ * The default is a current small-but-capable model (Claude Haiku 4.5),
+ * not a frontier one: the eval asks "does this artifact work for a
+ * normal user", and a frontier driver would flatter every artifact by
+ * papering over rough instructions. It is deliberately NOT the weakest
+ * option either — gpt-4o-mini, the previous default, was weak enough to
+ * add its own failures (building the wrong topic, asking for
+ * clarification instead of acting), which showed up as run-to-run score
+ * swings that were the model's noise, not the artifact's. A capable
+ * small model is the honest middle: representative of a real client,
+ * consistent enough that the number means something. Override with
+ * OPENROUTER_DRIVER_MODEL to pin a specific consumer tier.
  */
 function driverModel(): string {
   return (
-    process.env.OPENROUTER_DRIVER_MODEL ?? process.env.OPENROUTER_MODEL ?? "openai/gpt-4o-mini"
+    process.env.OPENROUTER_DRIVER_MODEL ??
+    process.env.OPENROUTER_MODEL ??
+    "anthropic/claude-haiku-4.5"
   );
 }
 

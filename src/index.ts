@@ -36,6 +36,10 @@ export { defineCheck, CheckRegistry, WELL_KNOWN_CATEGORIES } from "./check.js";
 export type { CheckContext, CheckDefinition } from "./check.js";
 export { runAssay, deriveValidity } from "./run.js";
 export type { RunOptions } from "./run.js";
+export { BUILTIN_SUITES, DEFAULT_SUITE_ID, resolveSuite, isBuiltinSuite } from "./suites.js";
+export type { SuiteDefinition } from "./suites.js";
+export { loadPlugins } from "./plugins.js";
+export type { LoadedPlugins, PluginFile, ExternalProbe } from "./plugins.js";
 export { scoreReport, DEFAULT_FORMULA } from "./score.js";
 export type { ScoreOptions } from "./score.js";
 export {

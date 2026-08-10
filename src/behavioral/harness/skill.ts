@@ -19,49 +19,60 @@ import type { EvalTestCase, Transcript } from "../types.js";
 const MAX_TURNS = 6;
 
 /** The standard tool surface every skill run gets. */
-function baseTools(allowedTools: string[]): LlmTool[] {
-  const tools: LlmTool[] = [
-    {
-      name: "bash",
-      description: "Run a shell command in the sandbox and read its stdout/stderr/exit code.",
-      inputSchema: {
-        type: "object",
-        properties: { cmd: { type: "string" } },
-        required: ["cmd"],
-      },
-    },
-    {
-      name: "write_file",
-      description: "Write a file into the sandbox.",
-      inputSchema: {
-        type: "object",
-        properties: { path: { type: "string" }, contents: { type: "string" } },
-        required: ["path", "contents"],
-      },
-    },
-    {
-      name: "read_file",
-      description: "Read a file back from the sandbox.",
-      inputSchema: {
-        type: "object",
-        properties: { path: { type: "string" } },
-        required: ["path"],
-      },
-    },
-  ];
-  // Surface any skill-declared allowed tools as additional named tools so
-  // the model's intent to use them is captured (and scannable for
-  // safety). They share the bash-style command surface.
+const BASH_TOOL: LlmTool = {
+  name: "bash",
+  description: "Run a shell command in the sandbox and read its stdout/stderr/exit code.",
+  inputSchema: { type: "object", properties: { cmd: { type: "string" } }, required: ["cmd"] },
+};
+const WRITE_TOOL: LlmTool = {
+  name: "write_file",
+  description: "Write a file into the sandbox.",
+  inputSchema: {
+    type: "object",
+    properties: { path: { type: "string" }, contents: { type: "string" } },
+    required: ["path", "contents"],
+  },
+};
+const READ_TOOL: LlmTool = {
+  name: "read_file",
+  description: "Read a file back from the sandbox.",
+  inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+};
+
+/**
+ * The tool surface the run exposes, ENFORCING the declared scope.
+ *
+ * Declared tools used to be metadata — the harness always granted the
+ * full bash/write/read surface and merely *added* named aliases, so a
+ * skill declaring `allowed-tools: [Read]` could still run a shell in the
+ * evaluation. That is not what a real client does, and it is the single
+ * largest safety gap the coverage audit found. Now:
+ *
+ *   - `undefined` (no declaration): permissive default — we cannot
+ *     restrict a scope that was never stated.
+ *   - `[]` (declared empty, "needs nothing"): NO tools. The run tests
+ *     whether the artifact truly needs none.
+ *   - `[Read, …]`: exactly the declared tools, mapped to the sandbox
+ *     surface (Read→read_file, Write/Edit→write_file, Bash/Execute→bash);
+ *     anything else becomes a named alias. Nothing outside the scope.
+ */
+export function baseTools(allowedTools?: string[]): LlmTool[] {
+  if (allowedTools === undefined) return [BASH_TOOL, WRITE_TOOL, READ_TOOL];
+
+  const lc = allowedTools.map((t) => t.toLowerCase().trim());
+  const has = (...names: string[]) => names.some((n) => lc.includes(n));
+  const tools: LlmTool[] = [];
+  if (has("bash", "execute", "shell")) tools.push(BASH_TOOL);
+  if (has("write", "edit", "multiedit")) tools.push(WRITE_TOOL);
+  if (has("read")) tools.push(READ_TOOL);
+
+  const GENERIC = new Set(["bash", "execute", "shell", "write", "edit", "multiedit", "read"]);
   for (const name of allowedTools) {
-    const lc = name.toLowerCase();
-    if (lc === "bash" || lc === "read" || lc === "write") continue;
+    if (GENERIC.has(name.toLowerCase().trim())) continue;
     tools.push({
       name: `tool_${slug(name)}`,
-      description: `Skill-declared allowed tool: ${name}.`,
-      inputSchema: {
-        type: "object",
-        properties: { cmd: { type: "string" } },
-      },
+      description: `Declared allowed tool: ${name}.`,
+      inputSchema: { type: "object", properties: { cmd: { type: "string" } } },
     });
   }
   return tools;
@@ -96,7 +107,12 @@ function asString(v: unknown): string | null {
 }
 
 /** Execute one tool call against the sandbox, returning a text result. */
-async function runTool(sandbox: Sandbox, call: LlmToolCall, cwd?: string): Promise<string> {
+async function runTool(
+  sandbox: Sandbox,
+  call: LlmToolCall,
+  cwd?: string,
+  traceWrap?: (cmd: string) => string,
+): Promise<string> {
   const input = call.input;
   if (call.name === "write_file") {
     const path = asString(input["path"]);
@@ -113,10 +129,14 @@ async function runTool(sandbox: Sandbox, call: LlmToolCall, cwd?: string): Promi
     const out = await sandbox.readFile(path);
     return out === null ? `(file not found: ${path})` : out;
   }
-  // bash + any tool_* alias all run a command.
+  // bash + any tool_* alias all run a command — this IS artifact
+  // execution, so it goes through the runtime recorder when one is on.
   const cmd = asString(input["cmd"]);
   if (cmd === null) return `error: ${call.name} needs "cmd" as a string.`;
-  const res = await sandbox.exec(cmd, { timeoutMs: 30_000, ...(cwd ? { cwd } : {}) });
+  const res = await sandbox.exec(traceWrap ? traceWrap(cmd) : cmd, {
+    timeoutMs: 30_000,
+    ...(cwd ? { cwd } : {}),
+  });
   return [
     `exit=${res.exitCode}${res.timedOut ? " (timed out)" : ""}`,
     res.stdout ? `stdout:\n${res.stdout}` : "",
@@ -135,20 +155,34 @@ export interface SkillHarnessInput {
   allowedTools?: string[];
   /** Working dir for sandbox commands (e.g. the provisioned clone). */
   cwd?: string;
+  /** Runtime-recorder wrapper for artifact-executing commands. */
+  traceWrap?: import("../types.js").TraceWrap;
+  /**
+   * Run the SAME prompt WITHOUT the skill instructions — the baseline
+   * arm of the uplift measurement. The system prompt becomes a plain
+   * assistant so the judge can score what the bare model achieves, and
+   * the difference is the value the skill actually adds.
+   */
+  baseline?: boolean;
   test: EvalTestCase;
 }
 
 /** Run one test case through the skill loop and return its transcript. */
 export async function runSkillCase(input: SkillHarnessInput): Promise<Transcript> {
   const { llm, sandbox, skillDoc, test } = input;
-  const tools = baseTools(input.allowedTools ?? []);
-  const system = [
-    "You are exercising a skill end-to-end. Follow the skill's instructions",
-    "and use the available tools to accomplish the user's request.",
-    "",
-    "=== SKILL INSTRUCTIONS ===",
-    skillDoc,
-  ].join("\n");
+  const tools = baseTools(input.allowedTools);
+  const system = input.baseline
+    ? [
+        "You are a capable assistant with access to a sandbox and its tools.",
+        "Accomplish the user's request as well as you can.",
+      ].join("\n")
+    : [
+        "You are exercising a skill end-to-end. Follow the skill's instructions",
+        "and use the available tools to accomplish the user's request.",
+        "",
+        "=== SKILL INSTRUCTIONS ===",
+        skillDoc,
+      ].join("\n");
 
   const messages: LlmMessage[] = [{ role: "user", content: test.prompt }];
   const allToolCalls: LlmToolCall[] = [];
@@ -172,7 +206,7 @@ export async function runSkillCase(input: SkillHarnessInput): Promise<Transcript
       allToolCalls.push(call);
       let result: string;
       try {
-        result = await runTool(sandbox, call, input.cwd);
+        result = await runTool(sandbox, call, input.cwd, input.traceWrap);
       } catch (err) {
         result = `tool error: ${(err as Error).message}`;
       }

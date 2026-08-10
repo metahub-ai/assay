@@ -90,7 +90,10 @@ export function toSarif(report: AssayReport, opts: { toolVersion?: string } = {}
       // all. Derived from weight, and only claimed for safety checks:
       // "CI is not configured" is not a security severity.
       ...(r.axis === "safety" ? { "security-severity": severityFor(r) } : {}),
-      tags: [r.axis, r.category],
+      // Deduped: axis and category coincide for safety checks (both
+      // "safety"), and a rule tagged ["safety","safety"] reads as a bug
+      // in the code-scanning UI's tag filter.
+      tags: [...new Set([r.axis, r.category])],
     },
   }));
 

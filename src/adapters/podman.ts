@@ -161,6 +161,16 @@ function providerFor(bin: ContainerCli): SandboxProvider {
       const args = ["run", "-d", "--rm"];
       // Egress control: when networkEgress is explicitly false, isolate.
       if (spec.networkEgress === false) args.push("--network=none");
+      else {
+        // NET_RAW so the runtime ledger's in-container tcpdump can open
+        // a capture socket — the default profile drops it and tcpdump
+        // fails with "Operation not permitted" even as root. Scoped to
+        // the container's own (isolated) network namespace, and only
+        // when the sandbox has a network at all. (E2B's microVM grants
+        // this to in-guest root already, so this is the podman-parity
+        // fix, not a new capability in the pipeline.)
+        args.push("--cap-add=NET_RAW");
+      }
       args.push(image, "sleep", "infinity");
       const run = await cli(
         bin,

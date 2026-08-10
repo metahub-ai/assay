@@ -28,8 +28,10 @@ import {
   type SandboxSpec,
 } from "../ports.js";
 import { meterLlm } from "../metering.js";
+import { startCapture, collectCapture, type CaptureHandle } from "./capture.js";
+import { analyzeLedger } from "./ledger.js";
 import { judgeTranscript, type JudgeConfig } from "./judge.js";
-import { scoreResults, DEFAULT_PASS_RATIO } from "./score.js";
+import { scoreResults, verdictMean, DEFAULT_PASS_RATIO } from "./score.js";
 import { loadTestCases } from "./test-cases.js";
 import { runSkillCase } from "./harness/skill.js";
 import { runMcpCase } from "./harness/mcp.js";
@@ -73,6 +75,8 @@ export interface RunBehavioralInput {
   caseCount?: number;
   /** Adversarial probes to layer on. 0 opts out. */
   probeCount?: number;
+  /** Extra adversarial probes from community plugins (always run). */
+  extraProbes?: import("./types.js").EvalTestCase[];
   sandboxSpec?: SandboxSpec;
   /**
    * Prompt-based agent (a Claude-Code-style `.claude/agents/<name>.md`):
@@ -114,9 +118,22 @@ export interface RunBehavioralInput {
    * the mean is the standard answer, and it costs k× to buy it.
    */
   repeat?: number;
+  /**
+   * Also run each normal case WITHOUT the skill and report the delta —
+   * the uplift-vs-baseline measurement. Skill-only, opt-in (roughly
+   * doubles the normal-case cost).
+   */
+  uplift?: boolean;
   caseCache?: CaseCache;
   /** Cache key; required for the cache to be consulted. */
   caseCacheKey?: string;
+  /**
+   * Capture ground-truth runtime behavior (tcpdump + strace) during the
+   * run. Default true — capture is best-effort and degrades to notes,
+   * so the only reason to disable it is a sandbox where the setup cost
+   * (a one-time apt-get) is unwelcome.
+   */
+  captureRuntime?: boolean;
 }
 
 function failedResult(
@@ -293,6 +310,7 @@ export async function runBehavioralEval(raw: RunBehavioralInput): Promise<Behavi
         ...(input.description !== undefined ? { description: input.description } : {}),
         ...(input.caseCount !== undefined ? { count: input.caseCount } : {}),
         ...(input.probeCount !== undefined ? { probeCount: input.probeCount } : {}),
+        ...(input.extraProbes ? { extraProbes: input.extraProbes } : {}),
       });
       if (input.caseCache && input.caseCacheKey) {
         await input.caseCache.set(input.caseCacheKey, cases);
@@ -313,6 +331,14 @@ export async function runBehavioralEval(raw: RunBehavioralInput): Promise<Behavi
     );
 
     const cwd = await provisionWorkspace(sandbox, input);
+
+    // Ground-truth recorders start BEFORE any artifact code runs, so
+    // install-time behavior is captured too (install traffic to package
+    // registries is infra-allowlisted at analysis time, not hidden).
+    let capture: CaptureHandle | null = null;
+    if (input.captureRuntime !== false) {
+      capture = await startCapture(sandbox);
+    }
 
     // Skill cases are independent prompt runs sharing no state, so the
     // only contention is the filesystem. Give each its own subdirectory
@@ -335,7 +361,7 @@ export async function runBehavioralEval(raw: RunBehavioralInput): Promise<Behavi
             Array.from({ length: repeat }, (_, r) => ({ ...c, id: `${c.id}#${r + 1}` })),
           );
     const judgeOne = async (test: EvalTestCase, caseCwd: string): Promise<BehavioralTestResult> => {
-      const transcript = await runCaseForKind(input, sandbox!, input.llm, caseCwd, test);
+      const transcript = await runCaseForKind(input, sandbox!, input.llm, caseCwd, test, capture);
       const verdict = await judgeTranscript({
         llm: input.llm,
         kind: input.kind,
@@ -390,12 +416,77 @@ export async function runBehavioralEval(raw: RunBehavioralInput): Promise<Behavi
     }
 
     const score = scoreResults(tests, input.passRatio ?? DEFAULT_PASS_RATIO);
+
+    // Uplift vs. no-skill baseline — the one number a buyer actually
+    // wants: does this skill beat the bare model? Opt-in (it re-runs each
+    // normal case without the skill instructions, so it roughly doubles
+    // the normal-case cost) and skill-only. The baseline is judged
+    // against the SAME documentation rubric, so the delta is "how much
+    // closer to the documented behavior the skill gets you".
+    let uplift: BehavioralEvalResult["uplift"];
+    if (input.uplift && input.kind === "skill" && tests.length > 0) {
+      const normal = tests.filter((t) => !t.test.adversarial);
+      const seen = new Set<string>();
+      const unique = normal.filter((t) =>
+        seen.has(t.test.prompt) ? false : (seen.add(t.test.prompt), true),
+      );
+      const withSkill = unique.map((t) => verdictMean(t.verdict));
+      const baseline: number[] = [];
+      for (const t of unique) {
+        const bt = await runSkillCase({
+          llm: input.llm,
+          sandbox,
+          skillDoc: input.doc,
+          cwd,
+          baseline: true,
+          ...(input.allowedTools ? { allowedTools: input.allowedTools } : {}),
+          test: t.test,
+        });
+        const v = await judgeTranscript({
+          llm: input.llm,
+          kind: input.kind,
+          doc: input.doc,
+          transcript: bt,
+          config: {
+            ...(input.judgeConfig ?? {}),
+            ...(input.allowedHosts ? { allowedHosts: input.allowedHosts } : {}),
+          },
+          ...(t.test.expect ? { expectation: t.test.expect } : {}),
+        });
+        if (!v.judgeFailed) baseline.push(verdictMean(v));
+      }
+      if (withSkill.length > 0 && baseline.length > 0) {
+        const mean = (a: number[]) => a.reduce((x, y) => x + y, 0) / a.length;
+        const r1 = (x: number) => Math.round(x * 10) / 10;
+        const w = mean(withSkill);
+        const b = mean(baseline);
+        uplift = { withSkill: r1(w), baseline: r1(b), delta: r1(w - b), n: baseline.length };
+      }
+    }
+
     // Every case sees the same server, so the first surface any harness
     // observed is the surface. Taking the first rather than merging is
     // deliberate: if two cases somehow saw DIFFERENT surfaces that is a
     // finding in itself, and silently unioning them would hide it.
     const observedSurface = tests.find((t) => t.transcript.observedSurface)?.transcript
       .observedSurface;
+    // The MCP observation (conformance + annotations) is the same across
+    // cases — it comes from the one handshake — so the first is
+    // representative.
+    const mcp = tests.find((t) => t.transcript.mcp)?.transcript.mcp;
+
+    // Collect the ledger AFTER the harness is done — collection kills
+    // the recorders. Best-effort: a collection failure becomes notes on
+    // the ledger, never a failed eval.
+    let runtime;
+    let runtimeAnalysis;
+    if (capture) {
+      runtime = await collectCapture(sandbox, capture, cwd);
+      runtimeAnalysis = analyzeLedger(runtime, {
+        ...(input.allowedHosts ? { declaredHosts: input.allowedHosts } : {}),
+        docText: input.doc,
+      });
+    }
     return {
       kind: input.kind,
       provider: providers,
@@ -406,6 +497,10 @@ export async function runBehavioralEval(raw: RunBehavioralInput): Promise<Behavi
       adversarial: score.adversarial,
       confidence: score.confidence,
       ...(observedSurface ? { observedSurface } : {}),
+      ...(mcp ? { mcp } : {}),
+      ...(uplift ? { uplift } : {}),
+      ...(runtime ? { runtime } : {}),
+      ...(runtimeAnalysis ? { runtimeAnalysis } : {}),
       usage: metered.usage(),
       generatedAt: new Date().toISOString(),
     };
@@ -437,25 +532,39 @@ async function runCaseForKind(
   llm: LlmProvider,
   cwd: string,
   test: EvalTestCase,
+  capture: CaptureHandle | null,
 ) {
+  // Harnesses wrap the commands that EXECUTE the artifact with this, so
+  // the artifact's whole process tree lands in the strace ledger.
+  const traceWrap = capture ? (cmd: string) => capture.wrap(cmd) : undefined;
   const skillArgs = {
     llm,
     sandbox,
     skillDoc: input.doc,
     cwd,
     ...(input.allowedTools ? { allowedTools: input.allowedTools } : {}),
+    ...(traceWrap ? { traceWrap } : {}),
     test,
   };
   switch (input.kind) {
     case "mcp":
-      return runMcpCase({ llm, sandbox, cwd, test });
+      return runMcpCase({ llm, sandbox, cwd, test, ...(traceWrap ? { traceWrap } : {}) });
     case "agent":
       // A prompt-based agent has no entry file to install and execute —
       // it is a system prompt plus a tool scope, so it runs the same
       // LLM-with-sandbox-tools loop a skill does.
-      return input.promptBased ? runSkillCase(skillArgs) : runAgentCase({ sandbox, cwd, test });
+      return input.promptBased
+        ? runSkillCase(skillArgs)
+        : runAgentCase({ sandbox, cwd, test, ...(traceWrap ? { traceWrap } : {}) });
     case "plugin":
-      return runPluginCase({ llm, sandbox, cwd, skillDoc: input.doc, test });
+      return runPluginCase({
+        llm,
+        sandbox,
+        cwd,
+        skillDoc: input.doc,
+        test,
+        ...(traceWrap ? { traceWrap } : {}),
+      });
     case "skill":
     default:
       return runSkillCase(skillArgs);

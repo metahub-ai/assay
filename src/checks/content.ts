@@ -213,6 +213,23 @@ const HIDDEN = [
 ] as const;
 
 /**
+ * First hidden character in a SHORT string (a tool/resource/prompt
+ * description, not a file), or null.
+ *
+ * The file-level check above distinguishes stray boundary marks from
+ * interleaved ones because a markdown table legitimately picks up paste
+ * artifacts. A protocol metadata string is different: it is a handful of
+ * words handed to the model as authoritative on every request, so ANY
+ * invisible character in it is suspect and there is no innocent
+ * table-paste reading to protect. Callers that scan declared metadata
+ * use this; the file scanner keeps its positional nuance.
+ */
+export function hiddenCharIn(text: string): string | null {
+  for (const h of HIDDEN) if (h.re.test(text)) return h.what;
+  return null;
+}
+
+/**
  * A zero-width character sitting BETWEEN two word characters.
  *
  * This is the shape that does something: splitting a word invisibly

@@ -1,0 +1,116 @@
+name: "Assay"
+description: "Evaluate an AI artifact (MCP server, skill, agent, plugin) and surface findings in GitHub code scanning."
+author: "MetaHub"
+branding:
+  icon: "shield"
+  color: "purple"
+
+inputs:
+  path:
+    description: "Path to the artifact to evaluate."
+    required: false
+    default: "."
+  kind:
+    description: "Artifact kind (skill | mcp | agent | plugin). Omit to auto-detect."
+    required: false
+    default: ""
+  suite:
+    description: "Suite id (assay:recommended | assay:strict | assay:mcp-server), or a custom label."
+    required: false
+    default: ""
+  min-score:
+    description: "Fail the run when the overall score is below this (0-100)."
+    required: false
+    default: ""
+  behavioral:
+    description: "Run the behavioral tier. Needs a sandbox + model credentials; off by default in CI."
+    required: false
+    default: "false"
+  args:
+    description: "Extra raw arguments appended to `assay run` (advanced)."
+    required: false
+    default: ""
+  version:
+    description: "Version of @metahub-ai/assay to run (npm dist-tag or exact version)."
+    required: false
+    default: "latest"
+  sarif-file:
+    description: "Path to write the SARIF 2.1.0 report to."
+    required: false
+    default: "assay-results.sarif"
+  upload:
+    description: "Upload the SARIF to GitHub code scanning (needs `security-events: write`)."
+    required: false
+    default: "true"
+  fail-on-error:
+    description: "Fail the job when assay exits non-zero (a blocking check failed, or the min-score gate tripped)."
+    required: false
+    default: "true"
+
+outputs:
+  sarif-file:
+    description: "Path to the generated SARIF file."
+    value: ${{ steps.run.outputs.sarif-file }}
+  exit-code:
+    description: "The exit code from `assay run` (0 clean, 1 blocking failure / gate, 2 usage error)."
+    value: ${{ steps.run.outputs.exit-code }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: "20"
+
+    - name: Run Assay
+      id: run
+      shell: bash
+      run: |
+        set -uo pipefail
+        args=(run "${{ inputs.path }}" --sarif)
+        [ -n "${{ inputs.kind }}" ]      && args+=(--kind "${{ inputs.kind }}")
+        [ -n "${{ inputs.suite }}" ]     && args+=(--suite "${{ inputs.suite }}")
+        [ -n "${{ inputs.min-score }}" ] && args+=(--min-score "${{ inputs.min-score }}")
+        if [ "${{ inputs.behavioral }}" = "true" ]; then args+=(--behavioral); else args+=(--no-behavioral); fi
+        # Extra args are intentionally word-split.
+        # shellcheck disable=SC2206
+        [ -n "${{ inputs.args }}" ] && args+=(${{ inputs.args }})
+
+        echo "assay ${args[*]}"
+        # SARIF goes to stdout; redirect it to the file. Progress is
+        # suppressed under --sarif, so stdout is the report alone.
+        set +e
+        npx -y "@metahub-ai/assay@${{ inputs.version }}" "${args[@]}" > "${{ inputs.sarif-file }}"
+        code=$?
+        set -e
+
+        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+        echo "sarif-file=${{ inputs.sarif-file }}" >> "$GITHUB_OUTPUT"
+
+        # A valid report is a non-empty SARIF file. If assay crashed before
+        # writing one, say so — but still let the fail-on-error step decide
+        # the job's fate.
+        if [ -s "${{ inputs.sarif-file }}" ]; then
+          echo "sarif-written=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "sarif-written=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::Assay produced no SARIF output (exit $code)."
+        fi
+
+    - name: Upload SARIF to code scanning
+      if: ${{ inputs.upload == 'true' && steps.run.outputs.sarif-written == 'true' }}
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ steps.run.outputs.sarif-file }}
+
+    - name: Enforce Assay result
+      if: ${{ inputs.fail-on-error == 'true' }}
+      shell: bash
+      run: |
+        code="${{ steps.run.outputs.exit-code }}"
+        if [ "$code" != "0" ]; then
+          echo "::error::Assay exited with code $code — a blocking check failed or the score gate tripped."
+          exit "$code"
+        fi
+        echo "Assay passed."

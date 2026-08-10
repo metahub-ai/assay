@@ -358,6 +358,72 @@ describe("renderReport", () => {
     expect(out.indexOf("NEEDS FIXING")).toBeLessThan(out.indexOf("Has a licence"));
   });
 
+  it("shows the 95% confidence interval on the behavior axis when the run bounded it", () => {
+    const withCi = report({
+      results: [
+        {
+          checkId: "behaves-as-documented",
+          checkVersion: "1.1.0",
+          title: "Behaves as documented",
+          category: "behavioral",
+          determinism: "replayable",
+          weight: 5,
+          axis: "behavior",
+          status: "pass",
+          summary: "behaves",
+          evidence: [{ type: "metric", name: "score_95ci_halfwidth", value: 6.2, unit: "points" }],
+        },
+      ],
+      score: {
+        overall: 93,
+        formula: "weighted",
+        axes: {
+          integrity: { value: 100, coverage: 1, checkIds: [] },
+          safety: { value: 100, coverage: 1, checkIds: [] },
+          care: { value: 100, coverage: 1, checkIds: [] },
+          behavior: { value: 93, coverage: 1, checkIds: ["behaves-as-documented"] },
+        },
+      },
+    });
+    const line = renderReport(withCi, opts)
+      .split("\n")
+      .find((l) => /behavior/.test(l))!;
+    expect(line).toMatch(/± ?6/);
+  });
+
+  it("omits the interval when a single sample makes it meaningless (half-width 100)", () => {
+    const noCi = report({
+      results: [
+        {
+          checkId: "behaves-as-documented",
+          checkVersion: "1.1.0",
+          title: "Behaves as documented",
+          category: "behavioral",
+          determinism: "replayable",
+          weight: 5,
+          axis: "behavior",
+          status: "pass",
+          summary: "behaves",
+          evidence: [{ type: "metric", name: "score_95ci_halfwidth", value: 100, unit: "points" }],
+        },
+      ],
+      score: {
+        overall: 93,
+        formula: "weighted",
+        axes: {
+          integrity: { value: 100, coverage: 1, checkIds: [] },
+          safety: { value: 100, coverage: 1, checkIds: [] },
+          care: { value: 100, coverage: 1, checkIds: [] },
+          behavior: { value: 93, coverage: 1, checkIds: ["behaves-as-documented"] },
+        },
+      },
+    });
+    const line = renderReport(noCi, opts)
+      .split("\n")
+      .find((l) => /behavior/.test(l))!;
+    expect(line).not.toMatch(/±/);
+  });
+
   it("marks a blocking failure as blocking", () => {
     expect(renderReport(report(), opts)).toMatch(/blocking/);
   });

@@ -350,6 +350,15 @@ describe("SARIF", () => {
     expect(s.runs[0].tool.driver.rules).toHaveLength(4);
   });
 
+  it("does not emit duplicate rule tags when axis and category coincide", () => {
+    for (const rule of sarif().runs[0].tool.driver.rules as {
+      properties: { tags: string[] };
+    }[]) {
+      const tags = rule.properties.tags;
+      expect(new Set(tags).size).toBe(tags.length);
+    }
+  });
+
   // Emitting a row per pass buries the findings and gets the
   // integration muted.
   it("reports only findings, not passes", () => {

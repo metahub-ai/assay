@@ -48,6 +48,8 @@ export interface PluginHarnessInput {
    * one. Used as the system prompt for the skill smoke-run.
    */
   skillDoc?: string;
+  /** Runtime-recorder wrapper, forwarded to the capability sub-runs. */
+  traceWrap?: import("../types.js").TraceWrap;
   test: EvalTestCase;
 }
 
@@ -179,6 +181,7 @@ export async function runPluginCase(input: PluginHarnessInput): Promise<Transcri
       sandbox,
       skillDoc: input.skillDoc ?? `Plugin: ${manifest.name ?? "unnamed"}.`,
       cwd,
+      ...(input.traceWrap ? { traceWrap: input.traceWrap } : {}),
       test,
     });
     messages.push(...sub.messages.filter((m) => m.role !== "user"));
@@ -193,7 +196,14 @@ export async function runPluginCase(input: PluginHarnessInput): Promise<Transcri
   });
   for (const cap of runnable) {
     if (cap.kind === "mcp" && cap.cmd) {
-      const sub = await runMcpCase({ llm: input.llm, sandbox, serverCmd: cap.cmd, cwd, test });
+      const sub = await runMcpCase({
+        llm: input.llm,
+        sandbox,
+        serverCmd: cap.cmd,
+        cwd,
+        ...(input.traceWrap ? { traceWrap: input.traceWrap } : {}),
+        test,
+      });
       messages.push({
         role: "assistant",
         content: `→ capability ${cap.label}`,
@@ -212,6 +222,7 @@ export async function runPluginCase(input: PluginHarnessInput): Promise<Transcri
         sandbox,
         skillDoc,
         cwd,
+        ...(input.traceWrap ? { traceWrap: input.traceWrap } : {}),
         test,
       });
       messages.push({

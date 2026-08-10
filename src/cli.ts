@@ -38,7 +38,10 @@ import {
 } from "./transcripts.js";
 import { generateKeyPair, signReport, verifyReport } from "./attest.js";
 import { CheckRegistry } from "./check.js";
+import type { CheckDefinition } from "./check.js";
 import { DEFAULT_CHECKS } from "./checks/index.js";
+import { resolveSuite, DEFAULT_SUITE_ID } from "./suites.js";
+import { loadPlugins, type PluginFile, type ExternalProbe } from "./plugins.js";
 import { digestTree } from "./digest.js";
 import { runAssay } from "./run.js";
 import { DirectorySource, RUNTIME_IGNORE } from "./sources/directory.js";
@@ -69,6 +72,7 @@ import type {
   CheckReport,
   RunEnvironment,
   ScanContext,
+  SubjectSource,
 } from "./types.js";
 import type { LlmProvider } from "./ports.js";
 
@@ -77,7 +81,9 @@ interface Args {
   kind?: ArtifactKind;
   json: boolean;
   quiet: boolean;
-  suite: string;
+  /** Suite id from `--suite`. Undefined means "not set on the CLI"; the
+   *  effective suite is then the config's, else the built-in default. */
+  suite?: string;
   help: boolean;
   sarif: boolean;
   config?: string;
@@ -97,8 +103,10 @@ interface Args {
   transcripts?: string;
   cases?: number;
   repeat?: number;
+  uplift: boolean;
   noCache: boolean;
   minScore?: number;
+  allowedHosts?: string[];
 }
 
 const KINDS = ["skill", "mcp", "agent", "plugin"] as const;
@@ -156,6 +164,7 @@ const RUN_FLAGS = [
   "transcripts",
   "cases",
   "repeat",
+  "uplift",
   "min-score",
   "config",
   "kind",
@@ -189,12 +198,12 @@ function parseArgs(argv: readonly string[]): Args {
     path: ".",
     json: false,
     quiet: false,
-    suite: "assay-starter",
     help: false,
     sarif: false,
     noConfig: false,
     net: false,
     noCache: false,
+    uplift: false,
   };
   const positional: string[] = [];
   for (let i = 0; i < argv.length; i++) {
@@ -221,6 +230,12 @@ function parseArgs(argv: readonly string[]): Args {
     // sandbox.
     else if (a === "--cases") args.cases = positiveInt(argv[++i], "--cases");
     else if (a === "--repeat") args.repeat = positiveInt(argv[++i], "--repeat");
+    else if (a === "--uplift") args.uplift = true;
+    else if (a === "--allowed-hosts")
+      args.allowedHosts = (argv[++i] ?? "")
+        .split(",")
+        .map((h) => h.trim())
+        .filter(Boolean);
     // The most obvious CI flag in the tool, and it was config-file-only:
     // gating a pipeline on a score meant committing an assay.config.json.
     else if (a === "--min-score") args.minScore = score0to100(argv[++i]);
@@ -230,6 +245,7 @@ function parseArgs(argv: readonly string[]): Args {
     else if (a === "--kind") args.kind = validKind(argv[++i]);
     else if (a.startsWith("--kind=")) args.kind = validKind(a.slice(7));
     else if (a === "--suite") args.suite = argv[++i] ?? args.suite;
+    else if (a.startsWith("--suite=")) args.suite = a.slice(8);
     else if (a.startsWith("--")) throw unknownFlag(a, RUN_FLAGS);
     // A single dash is a flag too. `-j` for `--json` used to be taken as
     // a path and reported as "No directory at ./-j", which sends the
@@ -304,10 +320,16 @@ BEHAVIORAL OPTIONS (on by default once configured — costs money and time)
   --provider <name>    anthropic | openai | openrouter | local
   --sandbox <name>     docker | podman (local, free) | e2b (cloud, needs a key)
   --transcripts <dir>  record transcripts here so the verdict can be replayed
-  --cases <n>          how many cases to synthesize (default 3)
+  --cases <n>          how many cases to synthesize (default 5)
   --repeat <k>         run each case k times and average (default 1).
+  --uplift             also run each skill case with NO skill and report
+                       the delta — does the skill beat the bare model?
+                       (skill-only, roughly doubles normal-case cost)
                        The driver is a model, so one sample per case is
                        noisy — k=3 roughly halves the interval, at k× cost
+  --allowed-hosts <h>  comma-separated hosts the artifact legitimately
+                       contacts; anything else it touches at runtime is
+                       reported as undeclared
   --no-cache           re-synthesize test cases instead of reusing the
                        cached set for this artifact digest
 
@@ -468,8 +490,31 @@ export function helpForCommand(command: string): number {
  *    the driver stands in for the end user's client, the judge grades
  *    the transcript.
  */
+/**
+ * The report's subject.source — recording WHAT was graded in a form that
+ * pins it, not the ephemeral tmpdir it was cloned into.
+ *
+ * A git target records its resolved commit (`git rev-parse HEAD`, so a
+ * moving ref becomes a fixed point); an npm target records its registry
+ * integrity as a tarball hash. This closes the audit's reproducibility
+ * gap: the resolved commit and integrity were computed and rendered to
+ * the terminal, then dropped from the report — leaving `directory:
+ * /tmp/...`, which reproduces nothing.
+ */
+export function subjectSource(fetched: Materialized, artifactPath: string): SubjectSource {
+  const p = fetched.provenance;
+  if (p.kind === "git" && p.url && p.resolved) {
+    return { type: "git", url: p.url, commit: p.resolved };
+  }
+  // An npm/registry integrity is base64 sha512 ("sha512-…"); the tarball
+  // variant's field is a hex sha256, so forcing it there would mislabel
+  // the hash. Kept as directory until the schema carries the registry
+  // integrity string verbatim (a follow-up, tracked in COVERAGE.md).
+  return { type: "directory", path: artifactPath };
+}
+
 export function buildEnvironment(
-  capabilities: { sandbox?: { name: string }; llm?: LlmProvider },
+  capabilities: { sandbox?: { name: string; image?: string }; llm?: LlmProvider },
   scanContext: ScanContext,
 ): RunEnvironment {
   return {
@@ -488,6 +533,17 @@ export function buildEnvironment(
             driver: {
               provider: capabilities.llm.name,
               model: capabilities.llm.modelFor?.("driver") ?? "(unreported)",
+            },
+            // Synthesis pins the model that WRITES the test cases. It was
+            // absent, so a report could not show that its cases were
+            // authored by the same model that then drove them — which is
+            // exactly the kind of thing a reproducibility claim rests on.
+            synthesis: {
+              provider: capabilities.llm.name,
+              model:
+                capabilities.llm.modelFor?.("synthesis") ??
+                capabilities.llm.modelFor?.("driver") ??
+                "(unreported)",
             },
           },
         }
@@ -781,16 +837,27 @@ async function resolveBehavioralScope(
     const raw = await source.readFile("SKILL.md");
     if (!raw) return {};
     const fm = parseFrontmatter(raw);
-    const declared = parseList(fm.fields["allowed-tools"] ?? fm.fields["allowedTools"]);
-    // An empty declaration is meaningful — "needs nothing" — but it is
-    // not a tool list to hand the driver, so it is left unset.
-    return declared.length > 0 ? { allowedTools: declared } : {};
+    const field = fm.fields["allowed-tools"] ?? fm.fields["allowedTools"];
+    // Tri-state, and the empty case is the one that used to be lost: a
+    // FIELD that is present-but-empty ("needs nothing") must reach the
+    // harness as [] so the run is actually restricted to nothing, not
+    // silently handed the permissive default. Absent → permissive.
+    if (field === undefined) return {};
+    return { allowedTools: parseList(field) };
   }
   if (kind === "agent") {
     // An agent with no executable entry point is a system prompt plus a
-    // tool scope, and runs the same loop a skill does.
+    // tool scope, and runs the same loop a skill does — including its
+    // declared `tools:`, which the harness must ENFORCE, not just record.
     const hasManifest = await source.exists("agent.json");
-    if (!hasManifest && (await findAgentMarkdown(source))) return { promptBased: true };
+    const md = !hasManifest ? await findAgentMarkdown(source) : null;
+    if (md) {
+      const raw = (await source.readFile(md)) ?? "";
+      const field = parseFrontmatter(raw).fields["tools"];
+      return field === undefined
+        ? { promptBased: true }
+        : { promptBased: true, allowedTools: parseList(field) };
+    }
   }
   return {};
 }
@@ -938,7 +1005,42 @@ async function evaluate(
   });
   let behavioral: BehavioralMode = mode;
 
-  let checks = [...DEFAULT_CHECKS];
+  // Resolve the suite. A CLI `--suite` wins over a config `suite`, which
+  // wins over the built-in default. The suite decides WHICH checks
+  // compose the registry, and contributes a policy overlay (thresholds)
+  // that sits BENEATH the user's own config — so `assay:strict` gates at
+  // 85 unless the user's config or `--min-score` says otherwise.
+  const suiteId = args.suite ?? policy.suite ?? DEFAULT_SUITE_ID;
+  const suite = resolveSuite(suiteId);
+  policy = { ...suite.policy, ...policy };
+  let checks = [...suite.checks];
+
+  // Community plugins: declarative checks + probes from JSON files named
+  // in the config, resolved relative to it. A malformed plugin is a hard
+  // error — a rule that cannot load must never be silently absent.
+  let externalProbes: ExternalProbe[] = [];
+  if (policy.plugins && policy.plugins.length > 0) {
+    if (!policyPath) {
+      throw new Error(`"plugins" requires a config file to resolve paths against.`);
+    }
+    const baseDir = dirname(resolvePath(policyPath));
+    const files: PluginFile[] = [];
+    for (const rel of policy.plugins) {
+      const abs = resolvePath(baseDir, rel);
+      try {
+        files.push({ source: rel, json: await readFile(abs, "utf8") });
+      } catch {
+        throw new Error(`plugin not found: ${rel} (resolved to ${abs}).`);
+      }
+    }
+    const loaded = loadPlugins(files);
+    checks.push(...loaded.checks);
+    externalProbes = loaded.probes;
+    if (!args.json && !args.sarif) {
+      for (const note of loaded.notes) write(theme.muted(`  ${note}\n`));
+    }
+  }
+
   const capabilities: NonNullable<Parameters<typeof runAssay>[0]["capabilities"]> = {
     now: Date.now,
   };
@@ -1002,7 +1104,17 @@ async function evaluate(
           caseCache: createCaseCache({ enabled: !args.noCache }),
           ...(args.cases !== undefined ? { caseCount: args.cases } : {}),
           ...(args.repeat !== undefined ? { repeat: args.repeat } : {}),
+          ...(args.uplift ? { uplift: true } : {}),
+          ...(externalProbes.length > 0
+            ? { extraProbes: externalProbes.filter((p) => p.kind === kind).map((p) => p.probe) }
+            : {}),
           ...(args.transcripts ? { transcripts: new FileTranscriptSink(args.transcripts) } : {}),
+          // Declared hosts reach the safety scan AND the runtime
+          // ledger's undeclared-host diff. CLI flag wins over config;
+          // previously this option existed and nothing could set it.
+          ...((args.allowedHosts ?? policy.allowedHosts)
+            ? { allowedHosts: args.allowedHosts ?? policy.allowedHosts }
+            : {}),
         }),
       );
       // Recorded so a reader can see the run had network and a model,
@@ -1128,12 +1240,12 @@ async function evaluate(
     subject: {
       kind,
       name: heading,
-      source: { type: "directory", path: artifactPath },
+      source: subjectSource(fetched, artifactPath),
       digest: { sha256: digest },
     },
     source,
     registry: CheckRegistry.from(checks),
-    suite: { id: policy.suite ?? args.suite, version: ASSAY_VERSION },
+    suite: { id: suite.id, version: ASSAY_VERSION },
     policy,
     ...(policyPath ? { policyPath } : {}),
     ...(policy.settings ? { config: policy.settings } : {}),
@@ -2081,20 +2193,29 @@ export async function initCommand(argv: readonly string[]): Promise<number> {
 export function listCommand(argv: readonly string[] = []): number {
   const theme = ui();
   let kind: ArtifactKind | undefined;
+  let suiteChecks: readonly CheckDefinition[] = DEFAULT_CHECKS;
+  let suiteLabel = "";
   try {
-    rejectUnknownFlags(argv, ["kind", "json"]);
+    rejectUnknownFlags(argv, ["kind", "json", "suite"]);
     const requested = flag(argv, "kind");
     if (requested) kind = validKind(requested);
+    const suiteId = flag(argv, "suite");
+    if (suiteId) {
+      const suite = resolveSuite(suiteId);
+      suiteChecks = suite.checks;
+      suiteLabel = ` in ${suite.id}`;
+    }
   } catch (err) {
     process.stderr.write(`assay: ${(err as Error).message}\n`);
     return 2;
   }
 
   // "Which checks apply to a plugin?" had no answer short of running a
-  // plugin through the tool and reading what came back.
+  // plugin through the tool and reading what came back. `--suite` narrows
+  // it further, to exactly the set a named preset would run.
   const checks = kind
-    ? DEFAULT_CHECKS.filter((c) => !c.appliesTo?.kinds || c.appliesTo.kinds.includes(kind!))
-    : DEFAULT_CHECKS;
+    ? suiteChecks.filter((c) => !c.appliesTo?.kinds || c.appliesTo.kinds.includes(kind!))
+    : suiteChecks;
 
   if (argv.includes("--json")) {
     write(
@@ -2134,7 +2255,7 @@ export function listCommand(argv: readonly string[] = []): number {
     write("\n");
   }
   write(
-    `  ${checks.length} check${checks.length === 1 ? "" : "s"}${kind ? ` for ${kind}` : ""}. ` +
+    `  ${checks.length} check${checks.length === 1 ? "" : "s"}${kind ? ` for ${kind}` : ""}${suiteLabel}. ` +
       `${theme.muted("`assay explain <id>` for details.")}\n\n`,
   );
   return 0;
@@ -2148,6 +2269,7 @@ export function explainCommand(argv: readonly string[]): number {
     process.stderr.write(`assay: ${(err as Error).message}\n`);
     return 2;
   }
+  const wantJson = argv.includes("--json");
   const id = argv.find((a) => !a.startsWith("-"));
   const check = DEFAULT_CHECKS.find((c) => c.id === id);
   if (!check) {
@@ -2157,6 +2279,35 @@ export function explainCommand(argv: readonly string[]): number {
         : `assay: no check named "${id}". Run \`assay list\` to see them all.\n`,
     );
     return 2;
+  }
+
+  // `--json` was accepted and silently ignored: the output was always
+  // the human-formatted block, so a tool asking for machine output got
+  // prose it could not parse. Emit the check's full metadata instead.
+  if (wantJson) {
+    write(
+      JSON.stringify(
+        {
+          id: check.id,
+          version: check.version,
+          title: check.title,
+          axis: check.axis,
+          category: check.category,
+          weight: check.weight ?? 1,
+          blocking: check.blocking ?? false,
+          determinism: check.determinism,
+          appliesTo: check.appliesTo?.kinds ?? null,
+          capabilities: check.needs ?? [],
+          ...(check.inspects ? { inspects: check.inspects } : {}),
+          ...(check.rationale ? { rationale: check.rationale } : {}),
+          ...(check.examples ? { examples: check.examples } : {}),
+          ...(check.spec ? { spec: check.spec } : {}),
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    return 0;
   }
   const t = theme;
   const L = (k: string, v: string) => `    ${t.muted(k.padEnd(13))}${v}\n`;

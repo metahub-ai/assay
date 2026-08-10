@@ -56,6 +56,21 @@ const SEVERITY: Record<string, number> = {
 const AXIS_ORDER = ["integrity", "safety", "care", "behavior"];
 
 /**
+ * The 95% half-interval on the behavior axis (0-100 scale), or null when
+ * the run couldn't bound it (a single sample, where the half-width is a
+ * meaningless 100). Read from the behavioral check's own evidence so
+ * render never recomputes what the engine already published.
+ */
+function behavioralHalfWidth(report: AssayReport): number | null {
+  const beh = report.results.find((r) => r.checkId === "behaves-as-documented");
+  const m = beh?.evidence?.find(
+    (e): e is Extract<Evidence, { type: "metric" }> =>
+      e.type === "metric" && e.name === "score_95ci_halfwidth",
+  );
+  return m && typeof m.value === "number" && m.value > 0 && m.value < 100 ? m.value : null;
+}
+
+/**
  * Indented to the content margin.
  *
  * Rules used to start at column 0 while every other line starts at 2, so
@@ -195,6 +210,13 @@ export function renderReport(report: AssayReport, opts: RenderOptions): string {
   }
   out.push("");
 
+  // The behavior axis comes from a stochastic driver, so its number is
+  // an estimate. Pull the 95% half-interval (on the 0-100 scale) from the
+  // behavioral check's evidence and show it inline — a bare "93" invites
+  // the exact over-reading this tool exists to prevent. Absent when the
+  // run had too few samples to bound it (n=1 → total uncertainty, which
+  // an honest "±50" would only clutter the line).
+  const behaviorCi = behavioralHalfWidth(report);
   for (const axis of AXIS_ORDER) {
     const a = report.score.axes[axis as keyof typeof report.score.axes];
     if (!a) continue;
@@ -209,8 +231,12 @@ export function renderReport(report: AssayReport, opts: RenderOptions): string {
     const cov = measured
       ? t.muted(`${String(Math.round(a.coverage * 100)).padStart(3)}% measured`)
       : t.muted("  not measured");
+    const ci =
+      axis === "behavior" && measured && behaviorCi !== null
+        ? t.muted(`  ± ${behaviorCi.toFixed(0)}`)
+        : "";
     out.push(
-      `  ${t.muted(axis.padEnd(10))}${scoreBar(t, a.value ?? 0, measured, 20)}  ${value}   ${cov}`,
+      `  ${t.muted(axis.padEnd(10))}${scoreBar(t, a.value ?? 0, measured, 20)}  ${value}${ci}   ${cov}`,
     );
   }
   // Say it where the dash is.
