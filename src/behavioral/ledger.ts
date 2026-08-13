@@ -660,7 +660,14 @@ export const INFRA_HOST_SUFFIXES = [
   "yarnpkg.com",
 ];
 
-/** Private / loopback / link-local ranges: recorded, never "undeclared". */
+/**
+ * Non-routable ranges: recorded, never "undeclared". Covers RFC 1918
+ * private, loopback, and link-local, plus the RFC 5737 TEST-NET
+ * documentation ranges. The latter can never reach a real host, so a
+ * connection to one is sandbox plumbing, not artifact behavior — E2B's
+ * microVM routes some internal traffic through `192.0.2.1` (TEST-NET-1),
+ * which otherwise showed up as an undeclared host on every E2B run.
+ */
 function isPrivateIp(ip: string): boolean {
   return (
     ip.startsWith("127.") ||
@@ -668,6 +675,9 @@ function isPrivateIp(ip: string): boolean {
     ip.startsWith("192.168.") ||
     /^172\.(1[6-9]|2\d|3[01])\./.test(ip) ||
     ip.startsWith("169.254.") ||
+    ip.startsWith("192.0.2.") || // TEST-NET-1
+    ip.startsWith("198.51.100.") || // TEST-NET-2
+    ip.startsWith("203.0.113.") || // TEST-NET-3
     ip === "0.0.0.0"
   );
 }

@@ -4,6 +4,17 @@ All notable changes to `@metahub-ai/assay` are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html); while on
 `0.x`, minor versions may carry breaking changes.
 
+## [0.2.3] — 2026-08-13
+
+### Fixed
+
+- **Sandbox plumbing no longer reads as an undeclared host.** The runtime
+  ledger's declared-vs-observed diff now treats the RFC 5737 TEST-NET ranges
+  (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`) as non-routable
+  infrastructure, alongside the private and link-local ranges it already
+  ignored. E2B routes some internal traffic through `192.0.2.1`, which was
+  otherwise flagged as an undeclared host on every E2B run.
+
 ## [0.2.2] — 2026-08-13
 
 ### Fixed
@@ -97,6 +108,7 @@ requested.
   "0.2"/"0.5" milestone codenames used during development are not version
   numbers. The project remains well short of the `1.0` maturity milestone.
 
+[0.2.3]: https://github.com/metahub-ai/assay/releases/tag/v0.2.3
 [0.2.2]: https://github.com/metahub-ai/assay/releases/tag/v0.2.2
 [0.2.1]: https://github.com/metahub-ai/assay/releases/tag/v0.2.1
 [0.2.0]: https://github.com/metahub-ai/assay/releases/tag/v0.2.0

@@ -416,6 +416,19 @@ describe("analyzeLedger", () => {
     expect(a.undeclaredHosts).toEqual([]);
   });
 
+  it("never charges non-routable sandbox plumbing (TEST-NET / link-local) as undeclared", () => {
+    // E2B routes some internal traffic through 192.0.2.1 (TEST-NET-1);
+    // these can never reach a real host, so they are infra, not exfil.
+    const a = analyzeLedger(
+      ledgerWith([
+        { ip: "192.0.2.1", port: 80 },
+        { ip: "169.254.0.21", port: 49983 },
+      ]),
+      {},
+    );
+    expect(a.undeclaredHosts).toEqual([]);
+  });
+
   it("raises an SSRF flag for the cloud metadata endpoint", () => {
     const a = analyzeLedger(ledgerWith([{ ip: "169.254.169.254", port: 80 }]), {});
     expect(a.flags.some((f) => f.includes("metadata"))).toBe(true);

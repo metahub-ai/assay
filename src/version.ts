@@ -12,7 +12,7 @@
  * is not true of the code that produced it, and for a tool whose whole
  * claim is that a grade is attributable, that is not a cosmetic slip.
  */
-export const ASSAY_VERSION = "0.2.2";
+export const ASSAY_VERSION = "0.2.3";
 
 /**
  * The project's canonical home.
