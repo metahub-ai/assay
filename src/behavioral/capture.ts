@@ -26,8 +26,35 @@ import { buildLedger, type RawCapture, type RuntimeLedger } from "./ledger.js";
 /** In-sandbox scratch dir for capture artifacts. */
 const CAP_DIR = "/tmp/.assay-cap";
 
-/** Refuse to pull captures bigger than this back out of the sandbox. */
-const MAX_PCAP_BYTES = 8 * 1024 * 1024;
+/**
+ * Refuse to pull captures bigger than this back out of the sandbox.
+ *
+ * With the capture filter below the pcap stays in the low kilobytes even
+ * through a heavy `npm install`, so this is a safety net, not a routine
+ * limit. It used to be 8 MB and an unfiltered `-i any` capture of an
+ * install's package downloads blew straight past it (~60 MB), so the
+ * whole capture was discarded and — worse — mislabeled "unavailable".
+ */
+const MAX_PCAP_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Capture only what the ledger reads, not whole payloads.
+ *
+ * The parser needs three things and nothing else: outbound TCP SYNs
+ * (which host:port a connection was opened to), DNS (to name the IPs),
+ * and the TLS ClientHello (for SNI when DNS is absent). Grabbing full
+ * payloads of every packet is what made an install's downloads balloon
+ * the pcap to tens of megabytes. This BPF filter keeps exactly the
+ * packets the ledger uses:
+ *   - `(tcp[tcpflags] & tcp-syn) != 0`  — connection initiations (+ SYN-ACK)
+ *   - `port 53`                          — DNS queries and answers
+ *   - `tcp[..payload..:2] = 0x1603`      — a TLS handshake record (ClientHello)
+ * paired with a small snaplen so even the handshakes are truncated to
+ * the header + SNI. Verified to survive `-i any` (Linux cooked) capture.
+ */
+const CAP_FILTER =
+  "(tcp[tcpflags] & tcp-syn) != 0 or port 53 or (tcp[((tcp[12]&0xf0)>>2):2] = 0x1603)";
+const CAP_SNAPLEN = 512;
 
 export interface CaptureHandle {
   /** Network capture (tcpdump) is running. */
@@ -86,6 +113,13 @@ export async function startCapture(sandbox: Sandbox): Promise<CaptureHandle> {
   try {
     await sandbox.exec(`mkdir -p ${CAP_DIR}`, { timeoutMs: 15_000 });
 
+    // The BPF filter goes to a FILE read with `tcpdump -F`, never as a
+    // shell argument. Passed inline it has to survive nested `sh -c`
+    // quoting, and one layer too many left tcpdump running with a filter
+    // that compiled but matched zero packets — a silent empty capture.
+    // A file has no quoting to get wrong.
+    await sandbox.writeFiles([{ path: `${CAP_DIR}/filter.bpf`, contents: `${CAP_FILTER}\n` }]);
+
     // Install BOTH recorders before starting either, so capture never
     // records its own tool-install traffic. In production the sandbox
     // template ships them pre-baked and these are instant no-ops; the
@@ -98,7 +132,10 @@ export async function startCapture(sandbox: Sandbox): Promise<CaptureHandle> {
       // socket. `-U` flushes per-packet so a kill loses nothing.
       const id = await sandbox.exec(`id -u`, { timeoutMs: 15_000 });
       const asRoot = id.stdout.trim() === "0";
-      const tcpdumpCmd = `nohup tcpdump -i any -U -w ${CAP_DIR}/net.pcap >/dev/null 2>&1 & echo $!`;
+      // `-F` reads the filter from the file written above; `-s` truncates
+      // to the header + SNI; `& echo $!` backgrounds tcpdump and reports
+      // its pid so the liveness check below can confirm it opened.
+      const tcpdumpCmd = `nohup tcpdump -i any -U -s ${CAP_SNAPLEN} -F ${CAP_DIR}/filter.bpf -w ${CAP_DIR}/net.pcap >/dev/null 2>&1 & echo $!`;
       const start = await sandbox.exec(
         asRoot
           ? `sh -c ${shellSingleQuote(tcpdumpCmd)}`

@@ -4,6 +4,34 @@ All notable changes to `@metahub-ai/assay` are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html); while on
 `0.x`, minor versions may carry breaking changes.
 
+## [0.2.1] — 2026-08-13
+
+Fixes the runtime network ledger on the local (podman) and E2B sandboxes.
+
+### Fixed
+
+- **Network ledger reliably reports again.** `tcpdump -i any` was capturing
+  full packet payloads including a provisioning `npm install`'s downloads
+  (~60 MB), which blew past the 8 MB retrieval cap, so the whole capture was
+  discarded and mislabeled "network capture unavailable." Capture now uses a
+  BPF filter for only what the ledger reads (TCP SYNs, DNS, and the TLS
+  ClientHello) with a small snaplen, so the pcap stays in the low kilobytes
+  even under heavy install traffic. The filter is passed via `tcpdump -F`
+  (a file), not a shell argument, because nested quoting had left tcpdump
+  running with a filter that compiled but matched zero packets. The retrieval
+  cap is raised to 32 MB as a safety net. Verified end-to-end on both podman
+  and E2B (the observed host `api.github.com` now appears in the ledger).
+- **Honest capture states.** The report now distinguishes "no outbound
+  connections observed (capture ran; nothing to report)" from "network
+  capture did not complete", naming the actual reason instead of a blanket
+  "unavailable."
+
+### Internal
+
+- Regression coverage for the Linux SLL2 link type that `-i any` captures
+  actually produce (previously only `RAW_IP` was exercised).
+- Dropped an accidental self-dependency from `package.json`.
+
 ## [0.2.0] — 2026-08-09
 
 The runtime-ledger + hardened-probes milestone. `0.1.x` graded an artifact from
@@ -58,4 +86,5 @@ requested.
   "0.2"/"0.5" milestone codenames used during development are not version
   numbers. The project remains well short of the `1.0` maturity milestone.
 
+[0.2.1]: https://github.com/metahub-ai/assay/releases/tag/v0.2.1
 [0.2.0]: https://github.com/metahub-ai/assay/releases/tag/v0.2.0

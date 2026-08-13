@@ -485,9 +485,17 @@ export async function toCheckResult(
     if (named.length > 0 || ra.flags.length > 0 || !result.runtime.captured.network) {
       detailLines.push("", "**Runtime behavior ledger:**");
       if (!result.runtime.captured.network) {
-        detailLines.push("- network capture unavailable in this sandbox (see report notes)");
+        // Say WHY, not just "unavailable" — the reason lives in the
+        // ledger notes (tcpdump could not run, the capture was too large
+        // to retrieve, etc.). A capture that ran and simply saw nothing
+        // takes the `no outbound connections observed` branch below, so
+        // this branch is only ever a genuine capture problem.
+        const why = result.runtime.notes.find((n) => /^(pcap|tcpdump|capture)\b/i.test(n));
+        detailLines.push(
+          `- network capture did not complete${why ? ` — ${why.replace(/^(pcap|tcpdump):\s*/i, "")}` : " (network telemetry unavailable in this sandbox)"}`,
+        );
       } else if (named.length === 0) {
-        detailLines.push("- no outbound connections observed");
+        detailLines.push("- no outbound connections observed (capture ran; nothing to report)");
       } else {
         detailLines.push(
           `- contacted: ${named.slice(0, 12).join(", ")}${named.length > 12 ? ` (+${named.length - 12} more)` : ""}`,

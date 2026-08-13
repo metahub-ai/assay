@@ -32,6 +32,17 @@ function u32le(n: number): number[] {
 }
 
 const LINKTYPE_RAW_IP = 101;
+const LINKTYPE_LINUX_SLL2 = 276;
+
+/**
+ * Linux "cooked v2" frame — the link type `tcpdump -i any` actually
+ * produces, which is what the sandbox capture uses. 20-byte header:
+ * protocol(2) reserved(2) ifindex(4) arphrd(2) pkttype(1) addrlen(1)
+ * addr(8), then the IP packet.
+ */
+function sll2(ethertype: number, ipPacket: number[]): number[] {
+  return [...u16be(ethertype), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ...ipPacket];
+}
 
 function pcapGlobalHeader(linktype: number): number[] {
   return [
@@ -216,6 +227,18 @@ describe("parsePcap", () => {
     );
     const obs = parsePcap(pcap);
     expect(obs.syns).toEqual([{ ip: "93.184.216.34", port: 443 }]);
+  });
+
+  it("parses a Linux SLL2 frame — the link type `-i any` captures actually use", () => {
+    // Regression: real sandbox captures are SLL2 (276), not RAW_IP. The
+    // capture path filters to SYN/DNS/TLS and writes SLL2; if the parser
+    // ever stopped reading this link type, every runtime ledger would go
+    // silently empty (a connection to api.github.com would vanish).
+    const pcap = bytes(
+      pcapGlobalHeader(LINKTYPE_LINUX_SLL2),
+      pcapRecord(sll2(0x0800, ipv4(6, [140, 82, 116, 6], tcp(443, 0x02)))),
+    );
+    expect(parsePcap(pcap).syns).toEqual([{ ip: "140.82.116.6", port: 443 }]);
   });
 
   it("records an outbound IPv6 TCP SYN with a compressed address", () => {
