@@ -485,6 +485,7 @@ export async function runBehavioralEval(raw: RunBehavioralInput): Promise<Behavi
       runtimeAnalysis = analyzeLedger(runtime, {
         ...(input.allowedHosts ? { declaredHosts: input.allowedHosts } : {}),
         docText: input.doc,
+        sandbox: input.sandboxProvider.name,
       });
     }
     return {

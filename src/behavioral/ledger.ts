@@ -707,7 +707,7 @@ export interface LedgerAnalysis {
  */
 export function analyzeLedger(
   ledger: RuntimeLedger,
-  policy: { declaredHosts?: string[]; docText?: string },
+  policy: { declaredHosts?: string[]; docText?: string; sandbox?: string },
 ): LedgerAnalysis {
   const declared = new Set((policy.declaredHosts ?? []).map((h) => h.toLowerCase()));
   const docHosts = extractDocHosts(policy.docText ?? "");
@@ -730,9 +730,17 @@ export function analyzeLedger(
   const declaredContacted = new Set<string>();
   const flags: string[] = [];
 
+  // E2B's own microVM contacts the metadata endpoint as part of its
+  // operation, so on E2B this fires on every eval and says nothing about
+  // the artifact. Suppress it there; the check stays live on every other
+  // sandbox (podman, docker, …) where a metadata hit really is the code.
+  const metadataIsInfra = policy.sandbox === "e2b";
+
   for (const conn of ledger.connections) {
     if (conn.ip === METADATA_IP) {
-      flags.push(`contacted the cloud metadata endpoint ${METADATA_IP} (SSRF pattern)`);
+      if (!metadataIsInfra) {
+        flags.push(`contacted the cloud metadata endpoint ${METADATA_IP} (SSRF pattern)`);
+      }
       continue;
     }
     if (conn.port === 53) continue; // DNS itself, reported via `dns`

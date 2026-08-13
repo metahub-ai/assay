@@ -434,6 +434,20 @@ describe("analyzeLedger", () => {
     expect(a.flags.some((f) => f.includes("metadata"))).toBe(true);
   });
 
+  it("suppresses the metadata SSRF flag on E2B, where the sandbox itself contacts it", () => {
+    const conns = [{ ip: "169.254.169.254", port: 80 }];
+    // Still flagged on any other sandbox...
+    expect(
+      analyzeLedger(ledgerWith(conns), { sandbox: "podman" }).flags.some((f) =>
+        f.includes("metadata"),
+      ),
+    ).toBe(true);
+    // ...but not on E2B, where it fires on every run from infra, not the artifact.
+    expect(
+      analyzeLedger(ledgerWith(conns), { sandbox: "e2b" }).flags.some((f) => f.includes("metadata")),
+    ).toBe(false);
+  });
+
   it("does not flag private/loopback IPs as undeclared", () => {
     const a = analyzeLedger(ledgerWith([{ ip: "127.0.0.1", port: 8080 }]), {});
     expect(a.undeclaredHosts).toEqual([]);

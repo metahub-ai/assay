@@ -4,6 +4,17 @@ All notable changes to `@metahub-ai/assay` are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html); while on
 `0.x`, minor versions may carry breaking changes.
 
+## [0.2.4] — 2026-08-13
+
+### Fixed
+
+- **Metadata-endpoint SSRF flag no longer fires on E2B infrastructure.** E2B's
+  microVM contacts the cloud metadata endpoint (`169.254.169.254`) as part of
+  its own operation, so the runtime ledger raised a spurious SSRF flag on every
+  E2B eval. The flag is now suppressed when the sandbox is E2B (where it carries
+  no signal about the artifact) and stays fully active on podman, docker, and
+  every other sandbox, where a metadata hit really is the code under test.
+
 ## [0.2.3] — 2026-08-13
 
 ### Fixed
@@ -108,6 +119,7 @@ requested.
   "0.2"/"0.5" milestone codenames used during development are not version
   numbers. The project remains well short of the `1.0` maturity milestone.
 
+[0.2.4]: https://github.com/metahub-ai/assay/releases/tag/v0.2.4
 [0.2.3]: https://github.com/metahub-ai/assay/releases/tag/v0.2.3
 [0.2.2]: https://github.com/metahub-ai/assay/releases/tag/v0.2.2
 [0.2.1]: https://github.com/metahub-ai/assay/releases/tag/v0.2.1
