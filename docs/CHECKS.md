@@ -58,6 +58,7 @@ reports `neutral` and leaves coverage alone. Our own failures report
 | [`no-assembled-credentials`](#no-assembled-credentials) | safety | 5 | yes | all |
 | [`no-dynamic-code-execution`](#no-dynamic-code-execution) | safety | 5 | yes | all |
 | [`no-escaping-symlinks`](#no-escaping-symlinks) | safety | 4 | yes | all |
+| [`no-exposed-pii`](#no-exposed-pii) | safety | 3 | — | all |
 | [`no-hardcoded-secrets`](#no-hardcoded-secrets) | safety | 5 | yes | all |
 | [`no-hidden-unicode`](#no-hidden-unicode) | safety | 4 | yes | all |
 | [`no-install-scripts`](#no-install-scripts) | safety | 4 | — | all |
@@ -80,6 +81,7 @@ reports `neutral` and leaves coverage alone. Our own failures report
 | [`mcp-tool-descriptions`](#mcp-tool-descriptions) | care | 3 | — | mcp |
 | [`recently-maintained`](#recently-maintained) | care | info | — | all |
 | [`skill-body`](#skill-body) | care | 3 | — | skill |
+| [`skill-distinctiveness`](#skill-distinctiveness) | care | 1 | — | skill |
 | [`skill-token-footprint`](#skill-token-footprint) | care | 2 | — | skill |
 | [`skill-triggers`](#skill-triggers) | care | 2 | — | skill |
 | [`tests-present`](#tests-present) | care | info | — | all |
@@ -415,6 +417,21 @@ A symlink is content that resolves somewhere else. One pointing at an absolute p
 
 <sub>axis `safety` · weight 4 · **blocking** · `deterministic` · applies to all kinds · v1.0.0</sub>
 
+### no-exposed-pii
+
+**No personal data in file contents**
+
+*What it looks at:* The contents of every text file, for a Luhn-valid payment card number or a structurally-valid US SSN.
+
+Personal data shipped inside an artifact is disclosed to everyone who installs it, and reaches git history and mirrors the moment it is published. Detection is confined to shapes that pass a validity test — Luhn for a card, the SSA's issuance rules for an SSN — so a version string or an id is not mistaken for someone's private data. As with secrets, the report never quotes the matched value.
+
+```
+✔  Contact support@example.com for help.
+✘  const card = "4111 1111 1111 1111";
+```
+
+<sub>axis `safety` · weight 3 · non-blocking · `deterministic` · applies to all kinds · v1.0.0</sub>
+
 ### no-hardcoded-secrets
 
 **No credentials in file contents**
@@ -683,6 +700,21 @@ The body is the instruction the model follows once the skill has triggered. A st
 
 <sub>axis `care` · weight 3 · non-blocking · `deterministic` · applies to skill · v1.0.0</sub>
 
+### skill-distinctiveness
+
+**Skill does not repeat its own guidance**
+
+*What it looks at:* The SKILL.md body, for whole paragraphs of guidance that are repeated verbatim (whitespace/case-insensitive).
+
+Duplicated guidance inside a skill is context the model re-reads and the buyer re-pays for on every trigger, with no added signal — the single-artifact half of SkillEvaluator's distinctiveness check. Confined to verbatim repeats of a substantial paragraph so a legitimately-repeated heading or one-line caution is never flagged.
+
+```
+✔  Each section of the workflow says something new.
+✘  The same paragraph of instructions is pasted under two headings.
+```
+
+<sub>axis `care` · weight 1 · non-blocking · `deterministic` · applies to skill · v1.0.0</sub>
+
 ### skill-token-footprint
 
 **Skill is not needlessly expensive to load**
@@ -726,4 +758,4 @@ An example is the fastest correct answer to how do I call this. Prose describing
 
 ---
 
-<sub>54 checks. Regenerate with `npm run docs:checks`.</sub>
+<sub>56 checks. Regenerate with `npm run docs:checks`.</sub>

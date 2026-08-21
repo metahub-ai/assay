@@ -18,6 +18,26 @@ import type { LlmMessage, LlmToolCall } from "../ports.js";
  */
 export type TraceWrap = (cmd: string) => string;
 
+/**
+ * How a case relates to the skill under test — the SkillEvaluator case
+ * taxonomy, so a synthesized or author-supplied set covers activation as
+ * well as execution.
+ *
+ *   - `explicit`   — the task names what the skill does; a direct ask.
+ *   - `implicit`   — the task needs the skill but never names it.
+ *   - `contextual` — the skill applies only given the surrounding context.
+ *   - `negative`   — the task is deliberately OUT OF SCOPE; the correct
+ *                    behavior is to recognize the skill does not apply and
+ *                    NOT force its workflow. Negative cases are what make
+ *                    the discoverability signal a precision measure and
+ *                    not just a recall one — they are not adversarial
+ *                    attacks, so they stay in the normal score basis.
+ *
+ * Skill-only and optional: absent means "an ordinary in-scope case",
+ * which is how every pre-taxonomy case is treated.
+ */
+export type SkillCaseType = "explicit" | "implicit" | "contextual" | "negative";
+
 /** A single behavioral test case fed to a harness. */
 export interface EvalTestCase {
   id: string;
@@ -25,6 +45,12 @@ export interface EvalTestCase {
   prompt: string;
   /** Optional natural-language expectation the judge scores against. */
   expect?: string;
+  /**
+   * The case's relationship to the skill (see {@link SkillCaseType}).
+   * Drives the discoverability judgement — especially `negative`, where
+   * NOT engaging the skill is the correct outcome.
+   */
+  caseType?: SkillCaseType;
   /**
    * This case deliberately attacks the artifact — prompt injection,
    * out-of-scope bait, an explicit request to do something destructive.
@@ -89,9 +115,53 @@ export interface JudgeVerdict {
   judgeFailed?: true;
   pass: boolean;
   scores: Record<Dimension, number>;
+  /**
+   * Skill-only: did the skill activate appropriately for THIS task?
+   *
+   * Requested from the judge only for a skill's non-adversarial cases,
+   * so the core four-dimension scoring for every other kind is
+   * unchanged. High when the skill engaged a relevant task or correctly
+   * stayed out of an irrelevant (`negative`) one; low when it ignored a
+   * task it should own or shoehorned itself into one it should not.
+   * Absent when not requested or not returned.
+   */
+  discoverability?: number;
   rationale: string;
   /** Human-readable safety concerns, e.g. "ran rm -rf". Empty = clean. */
   safetyFlags: string[];
+}
+
+/**
+ * The five named skill dimensions, aligned with NVIDIA SkillEvaluator's
+ * scorecard so a reader can compare like for like. Every value is 0–10.
+ *
+ * This is a PROJECTION of signals Assay already computes, not a second
+ * evaluation: four of the five come straight from the existing judge and
+ * usage metering; only `discoverability` is a dedicated new judgement.
+ * The mapping:
+ *
+ *   - correctness    ← judge `correctness`      (outcome accuracy)
+ *   - discoverability ← judge `discoverability` (appropriate activation)
+ *   - effectiveness  ← judge `instruction_adherence`
+ *                      (goal achievement + workflow adherence)
+ *   - efficiency     ← judge `latency`
+ *                      (getting there without wasted steps)
+ *   - security       ← judge `safety`, floored by any deterministic flag
+ *
+ * `lift` is the aggregate uplift-vs-baseline delta when it was measured —
+ * SkillEvaluator's "Skill Lift", the with-minus-without number — carried
+ * here so the scorecard and the lift travel together.
+ */
+export interface SkillScorecard {
+  correctness: number;
+  discoverability: number;
+  effectiveness: number;
+  efficiency: number;
+  security: number;
+  /** Uplift-vs-baseline delta on 0–10, when uplift was measured. */
+  lift?: number;
+  /** Normal cases the scorecard was computed from. */
+  basis: number;
 }
 
 /** One test case + its transcript + the judge's verdict. */
@@ -152,6 +222,13 @@ export interface BehavioralEvalResult {
    * the value the skill adds, on the 0–10 scale.
    */
   uplift?: { withSkill: number; baseline: number; delta: number; n: number };
+  /**
+   * Skill-only: the five named dimensions (correctness, discoverability,
+   * effectiveness, efficiency, security) projected from this run's
+   * signals, for a like-for-like read against SkillEvaluator. Absent for
+   * other kinds and when there was no normal case to score.
+   */
+  scorecard?: SkillScorecard;
   generatedAt: string;
   /**
    * Set when the run couldn't complete (provider failure, sandbox

@@ -13,6 +13,8 @@ import {
   skillTokenFootprint,
   skillResourcesResolve,
   skillFrontmatterDepth,
+  skillDistinctiveness,
+  findDuplicatedGuidance,
 } from "../src/checks/kinds/skill-safety";
 import type { CheckContext, CheckDefinition } from "../src/check";
 import type { CheckResult, Subject } from "../src/types";
@@ -157,5 +159,50 @@ describe("skill-frontmatter-depth", () => {
     });
     expect(r.status).toBe("warn");
     expect(r.detail).toMatch(/unknown frontmatter key/);
+  });
+});
+
+// ── B5: distinctiveness / duplicated guidance ────────────────────────
+
+describe("findDuplicatedGuidance", () => {
+  it("detects a verbatim-repeated substantial paragraph", () => {
+    const p = "Always validate the user input before writing any file to the target directory carefully.";
+    const { blocks, redundantPct } = findDuplicatedGuidance(`${p}\n\n## Later\n\n${p}`);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]!.count).toBe(2);
+    expect(redundantPct).toBeGreaterThan(0);
+  });
+
+  it("ignores repeats shorter than the paragraph threshold", () => {
+    const { blocks } = findDuplicatedGuidance("## Setup\n\nrun it\n\n## Setup\n\nrun it");
+    expect(blocks).toHaveLength(0);
+  });
+
+  it("does not count a repeated fenced code block", () => {
+    const code = "```\nnpm run build\n```";
+    const { blocks } = findDuplicatedGuidance(`Do this.\n\n${code}\n\nThen that.\n\n${code}`);
+    expect(blocks).toHaveLength(0);
+  });
+});
+
+describe("skill-distinctiveness", () => {
+  const mkDoc = (body: string) => `---\nname: d\ndescription: Does a thing\n---\n${body}`;
+
+  it("warns when a whole paragraph of guidance is pasted twice", async () => {
+    const p = "Always validate the user input before writing any file to the target directory carefully.";
+    const r = await run(skillDistinctiveness, { "SKILL.md": mkDoc(`${p}\n\n## Again\n\n${p}`) });
+    expect(r.status).toBe("warn");
+    expect(r.summary).toMatch(/redundant/);
+  });
+
+  it("passes a skill whose sections each say something new", async () => {
+    const body = "First, read the input.\n\nNext, transform it into the target shape.\n\nFinally, write the result and report what changed.";
+    const r = await run(skillDistinctiveness, { "SKILL.md": mkDoc(body) });
+    expect(r.status).toBe("pass");
+  });
+
+  it("skips when there is no SKILL.md", async () => {
+    const r = await run(skillDistinctiveness, { "README.md": "nope" });
+    expect(r.status).toBe("skip");
   });
 });

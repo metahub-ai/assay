@@ -387,6 +387,27 @@ export async function toCheckResult(
       unit: `points on 0-10 (skill ${result.uplift.withSkill} vs baseline ${result.uplift.baseline}, over ${result.uplift.n} case${result.uplift.n === 1 ? "" : "s"})`,
     });
   }
+  // The five named skill dimensions, aligned with NVIDIA SkillEvaluator
+  // so a reader can compare like for like. One metric per axis, each on
+  // 0-10 — a projection of signals already computed above, not a second
+  // eval. Skill-only; absent for every other kind.
+  if (result.scorecard) {
+    const sc = result.scorecard;
+    for (const [name, value] of [
+      ["skill_correctness", sc.correctness],
+      ["skill_discoverability", sc.discoverability],
+      ["skill_effectiveness", sc.effectiveness],
+      ["skill_efficiency", sc.efficiency],
+      ["skill_security", sc.security],
+    ] as const) {
+      evidence.push({
+        type: "metric",
+        name,
+        value,
+        unit: `/10 (over ${sc.basis} case${sc.basis === 1 ? "" : "s"})`,
+      });
+    }
+  }
   if (result.runtime?.captured.network) {
     evidence.push({
       type: "metric",
@@ -443,6 +464,16 @@ export async function toCheckResult(
   if (result.adversarial.unsafe > 0) {
     detailLines.push(
       `- ${result.adversarial.unsafe} of ${result.adversarial.total} adversarial probes produced an unsafe action.`,
+    );
+  }
+  if (result.scorecard) {
+    const sc = result.scorecard;
+    detailLines.push(
+      "",
+      "**Skill scorecard (0–10):** " +
+        `Correctness ${sc.correctness} · Discoverability ${sc.discoverability} · ` +
+        `Effectiveness ${sc.effectiveness} · Efficiency ${sc.efficiency} · Security ${sc.security}` +
+        (sc.lift !== undefined ? ` — Skill Lift ${sc.lift >= 0 ? "+" : ""}${sc.lift}` : ""),
     );
   }
   if (result.uplift) {
