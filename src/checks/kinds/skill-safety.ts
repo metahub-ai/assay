@@ -329,9 +329,99 @@ export const skillFrontmatterDepth = defineCheck({
   },
 });
 
+// ── B5: distinctiveness — duplicated guidance within the skill ───────
+
+/**
+ * Substantial guidance that appears more than once in the SKILL.md body.
+ *
+ * The single-artifact half of a distinctiveness check (the cross-catalog
+ * half — does this skill overlap OTHERS — needs the whole catalog and is
+ * the registry's job, not a single-artifact evaluator's). Detection is
+ * exact after whitespace/case normalization and confined to paragraphs
+ * of at least this many words, which is what keeps it quiet: a skill
+ * legitimately repeats a heading or a one-line caution, but repeating a
+ * twelve-word paragraph verbatim is copy-paste bloat that the model pays
+ * for on every trigger. Fenced code blocks are excluded — a repeated
+ * snippet there is usually intentional.
+ */
+const MIN_DUP_WORDS = 12;
+
+export function findDuplicatedGuidance(body: string): {
+  blocks: { text: string; count: number }[];
+  redundantPct: number;
+} {
+  // Code blocks legitimately repeat (two examples of the same call), so
+  // they are not guidance-bloat; drop them before splitting.
+  const prose = body.replace(/```[\s\S]*?```/g, "\n\n");
+  const paras = prose.split(/\n\s*\n/);
+  const norm = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+  const seen = new Map<string, { text: string; count: number; words: number }>();
+  let totalWords = 0;
+  for (const p of paras) {
+    const n = norm(p);
+    if (!n) continue;
+    const words = n.split(" ").length;
+    totalWords += words;
+    if (words < MIN_DUP_WORDS) continue;
+    const e = seen.get(n) ?? { text: p.trim(), count: 0, words };
+    e.count++;
+    seen.set(n, e);
+  }
+  const dups = [...seen.values()].filter((e) => e.count > 1);
+  // Words spent on the redundant COPIES (not the first, legitimate one).
+  const redundantWords = dups.reduce((a, e) => a + e.words * (e.count - 1), 0);
+  const redundantPct = totalWords > 0 ? Math.round((redundantWords / totalWords) * 100) : 0;
+  return {
+    blocks: dups.map((e) => ({ text: e.text, count: e.count })),
+    redundantPct,
+  };
+}
+
+export const skillDistinctiveness = defineCheck({
+  id: "skill-distinctiveness",
+  version: "1.0.0",
+  title: "Skill does not repeat its own guidance",
+  category: "kind-specific",
+  axis: "care",
+  determinism: "deterministic",
+  weight: 1,
+  appliesTo: { kinds: ["skill"] },
+  spec: checkSpecUrl("skill-distinctiveness"),
+  inspects:
+    "The SKILL.md body, for whole paragraphs of guidance that are repeated verbatim (whitespace/case-insensitive).",
+  rationale:
+    "Duplicated guidance inside a skill is context the model re-reads and the buyer re-pays for on every trigger, with no added signal — the single-artifact half of SkillEvaluator's distinctiveness check. Confined to verbatim repeats of a substantial paragraph so a legitimately-repeated heading or one-line caution is never flagged.",
+  examples: {
+    passing: "Each section of the workflow says something new.",
+    failing: "The same paragraph of instructions is pasted under two headings.",
+  },
+  async run(ctx): Promise<CheckResult> {
+    const raw = await ctx.source.readFile(SKILL_DOC);
+    if (raw === null) return { status: "skip", summary: "No SKILL.md to inspect." };
+    const { body } = parseFrontmatter(raw);
+    const { blocks, redundantPct } = findDuplicatedGuidance(body);
+    if (blocks.length === 0) {
+      return { status: "pass", summary: "No duplicated guidance in the skill body." };
+    }
+    const total = blocks.reduce((a, b) => a + (b.count - 1), 0);
+    return {
+      status: "warn",
+      summary: `${total} duplicated passage${total === 1 ? "" : "s"} in the skill body (~${redundantPct}% redundant).`,
+      detail: blocks
+        .slice(0, 6)
+        .map((b) => `- repeated ${b.count}×: "${b.text.replace(/\s+/g, " ").slice(0, 80)}…"`)
+        .join("\n"),
+      remediation:
+        "Say each thing once. Consolidate the repeated guidance into a single place, or move shared detail into a referenced file so it is loaded on demand rather than re-read every trigger.",
+      evidence: [{ type: "file", path: SKILL_DOC }],
+    };
+  },
+});
+
 export const SKILL_SAFETY_CHECKS = [
   skillNoHostileActions,
   skillTokenFootprint,
   skillResourcesResolve,
   skillFrontmatterDepth,
+  skillDistinctiveness,
 ];

@@ -32,6 +32,7 @@ import { startCapture, collectCapture, type CaptureHandle } from "./capture.js";
 import { analyzeLedger } from "./ledger.js";
 import { judgeTranscript, type JudgeConfig } from "./judge.js";
 import { scoreResults, verdictMean, DEFAULT_PASS_RATIO } from "./score.js";
+import { computeSkillScorecard } from "./scorecard.js";
 import { loadTestCases } from "./test-cases.js";
 import { runSkillCase } from "./harness/skill.js";
 import { runMcpCase } from "./harness/mcp.js";
@@ -373,6 +374,7 @@ export async function runBehavioralEval(raw: RunBehavioralInput): Promise<Behavi
         },
         ...(test.expect ? { expectation: test.expect } : {}),
         ...(test.adversarial ? { adversarial: true } : {}),
+        ...(test.caseType ? { caseType: test.caseType } : {}),
       });
       return { test, transcript, verdict };
     };
@@ -425,7 +427,11 @@ export async function runBehavioralEval(raw: RunBehavioralInput): Promise<Behavi
     // closer to the documented behavior the skill gets you".
     let uplift: BehavioralEvalResult["uplift"];
     if (input.uplift && input.kind === "skill" && tests.length > 0) {
-      const normal = tests.filter((t) => !t.test.adversarial);
+      // Uplift is "how much value does the skill add on tasks it OWNS".
+      // Out-of-scope negatives are excluded: on a task the skill should
+      // ignore, both arms correctly do nothing, so the delta there is
+      // noise around zero and only dilutes the signal.
+      const normal = tests.filter((t) => !t.test.adversarial && t.test.caseType !== "negative");
       const seen = new Set<string>();
       const unique = normal.filter((t) =>
         seen.has(t.test.prompt) ? false : (seen.add(t.test.prompt), true),
@@ -468,6 +474,12 @@ export async function runBehavioralEval(raw: RunBehavioralInput): Promise<Behavi
     // observed is the surface. Taking the first rather than merging is
     // deliberate: if two cases somehow saw DIFFERENT surfaces that is a
     // finding in itself, and silently unioning them would hide it.
+    // The five-dimension scorecard — a projection of this run's signals
+    // onto SkillEvaluator's named axes, so the two are directly
+    // comparable. Skill-only; `undefined` when there was no normal case.
+    const scorecard =
+      input.kind === "skill" ? computeSkillScorecard(tests, uplift) : undefined;
+
     const observedSurface = tests.find((t) => t.transcript.observedSurface)?.transcript
       .observedSurface;
     // The MCP observation (conformance + annotations) is the same across
@@ -500,6 +512,7 @@ export async function runBehavioralEval(raw: RunBehavioralInput): Promise<Behavi
       ...(observedSurface ? { observedSurface } : {}),
       ...(mcp ? { mcp } : {}),
       ...(uplift ? { uplift } : {}),
+      ...(scorecard ? { scorecard } : {}),
       ...(runtime ? { runtime } : {}),
       ...(runtimeAnalysis ? { runtimeAnalysis } : {}),
       usage: metered.usage(),

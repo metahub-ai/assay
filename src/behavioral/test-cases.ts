@@ -15,8 +15,17 @@
  */
 import type { ArtifactKind } from "../types.js";
 import type { LlmProvider } from "../ports.js";
-import type { EvalTestCase } from "./types.js";
+import type { EvalTestCase, SkillCaseType } from "./types.js";
 import { getProbeCases, PROBE_CAP_DEFAULT } from "./probes.js";
+
+const CASE_TYPES: readonly SkillCaseType[] = ["explicit", "implicit", "contextual", "negative"];
+
+/** Accept a caseType only when it is one of the four known labels. */
+function coerceCaseType(v: unknown): SkillCaseType | undefined {
+  return typeof v === "string" && (CASE_TYPES as readonly string[]).includes(v)
+    ? (v as SkillCaseType)
+    : undefined;
+}
 
 export const DEFAULT_CASE_COUNT = 5;
 
@@ -31,6 +40,7 @@ interface RawCase {
   id?: unknown;
   prompt?: unknown;
   expect?: unknown;
+  caseType?: unknown;
 }
 
 /** Parse cases out of a single `evals/*.json` file's contents. */
@@ -53,10 +63,12 @@ export function parseEvalFile(contents: string): EvalTestCase[] {
     if (!raw || typeof raw !== "object") continue;
     const c = raw as RawCase;
     if (typeof c.prompt !== "string" || c.prompt.trim().length === 0) continue;
+    const caseType = coerceCaseType(c.caseType);
     out.push({
       id: typeof c.id === "string" && c.id ? c.id : `case-${i + 1}`,
       prompt: c.prompt,
       ...(typeof c.expect === "string" ? { expect: c.expect } : {}),
+      ...(caseType ? { caseType } : {}),
     });
   }
   return out;
@@ -111,11 +123,30 @@ export function extractJsonArray(text: string): string {
  */
 async function synthesizeCases(input: LoadTestCasesInput): Promise<EvalTestCase[]> {
   const count = input.count ?? DEFAULT_CASE_COUNT;
-  const system = [
-    "Synthesize test cases for a behavioral evaluation.",
-    `Produce up to ${count} concrete user prompts that exercise this artifact.`,
-    "Respond with ONLY a JSON array of {id, prompt, expect} objects.",
-  ].join("\n");
+  // For skills we also probe ACTIVATION, not just execution: a labelled
+  // mix across the taxonomy, with at least one out-of-scope `negative`
+  // case, is what lets the run measure discoverability (does the skill
+  // fire when it should and stay quiet when it should not?). Other kinds
+  // keep the plain shape — the taxonomy is a skill concept.
+  const wantTaxonomy = input.kind === "skill";
+  const system = wantTaxonomy
+    ? [
+        "Synthesize test cases for a behavioral evaluation of an agent SKILL.",
+        `Produce up to ${count} concrete user prompts that exercise this skill.`,
+        "Cover a spread of caseType values:",
+        "  - explicit: the task directly names what the skill does.",
+        "  - implicit: the task needs the skill but never names it.",
+        "  - contextual: the skill applies only given the surrounding context.",
+        "  - negative: an UNRELATED, out-of-scope task the skill should NOT handle.",
+        "Include at LEAST one negative case. For a negative case, `expect` should say the",
+        "assistant recognizes the skill does not apply and does not force its workflow.",
+        'Respond with ONLY a JSON array of {id, prompt, expect, caseType} objects.',
+      ].join("\n")
+    : [
+        "Synthesize test cases for a behavioral evaluation.",
+        `Produce up to ${count} concrete user prompts that exercise this artifact.`,
+        "Respond with ONLY a JSON array of {id, prompt, expect} objects.",
+      ].join("\n");
   const user = [
     `Description: ${input.description ?? "(none)"}`,
     `Triggers: ${(input.triggers ?? []).join(", ") || "(none)"}`,

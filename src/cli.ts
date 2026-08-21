@@ -104,6 +104,7 @@ interface Args {
   cases?: number;
   repeat?: number;
   uplift: boolean;
+  noUplift: boolean;
   noCache: boolean;
   minScore?: number;
   allowedHosts?: string[];
@@ -165,6 +166,7 @@ const RUN_FLAGS = [
   "cases",
   "repeat",
   "uplift",
+  "no-uplift",
   "min-score",
   "config",
   "kind",
@@ -204,6 +206,7 @@ function parseArgs(argv: readonly string[]): Args {
     net: false,
     noCache: false,
     uplift: false,
+    noUplift: false,
   };
   const positional: string[] = [];
   for (let i = 0; i < argv.length; i++) {
@@ -231,6 +234,7 @@ function parseArgs(argv: readonly string[]): Args {
     else if (a === "--cases") args.cases = positiveInt(argv[++i], "--cases");
     else if (a === "--repeat") args.repeat = positiveInt(argv[++i], "--repeat");
     else if (a === "--uplift") args.uplift = true;
+    else if (a === "--no-uplift") args.noUplift = true;
     else if (a === "--allowed-hosts")
       args.allowedHosts = (argv[++i] ?? "")
         .split(",")
@@ -324,9 +328,13 @@ BEHAVIORAL OPTIONS (on by default once configured — costs money and time)
   --repeat <k>         run each case k times and average (default 1).
   --uplift             also run each skill case with NO skill and report
                        the delta — does the skill beat the bare model?
-                       (skill-only, roughly doubles normal-case cost)
+                       (skill-only, roughly doubles normal-case cost). ON
+                       by default for skills, since it feeds the scorecard's
+                       effectiveness read and IS the Skill Lift number.
                        The driver is a model, so one sample per case is
                        noisy — k=3 roughly halves the interval, at k× cost
+  --no-uplift          skip the uplift/Skill-Lift pass for a skill (halves
+                       the cost; the scorecard then omits the lift line)
   --allowed-hosts <h>  comma-separated hosts the artifact legitimately
                        contacts; anything else it touches at runtime is
                        reported as undeclared
@@ -1104,7 +1112,12 @@ async function evaluate(
           caseCache: createCaseCache({ enabled: !args.noCache }),
           ...(args.cases !== undefined ? { caseCount: args.cases } : {}),
           ...(args.repeat !== undefined ? { repeat: args.repeat } : {}),
-          ...(args.uplift ? { uplift: true } : {}),
+          // Uplift is the with/without "Skill Lift" measurement and it
+          // powers the effectiveness read on the scorecard, so it is ON
+          // by default for skills — the one kind it applies to — unless
+          // explicitly waived with --no-uplift. Other kinds keep it
+          // opt-in via --uplift (where it is a no-op anyway).
+          ...((kind === "skill" ? !args.noUplift : args.uplift) ? { uplift: true } : {}),
           ...(externalProbes.length > 0
             ? { extraProbes: externalProbes.filter((p) => p.kind === kind).map((p) => p.probe) }
             : {}),

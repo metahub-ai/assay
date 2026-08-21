@@ -515,9 +515,126 @@ const noEscapingSymlinks = defineCheck({
   },
 });
 
+// ── personal data (PII) ──────────────────────────────────────────────
+
+/**
+ * Luhn checksum — the last line of defence against a false positive on a
+ * long digit run. A random 16-digit id passes Luhn 1-in-10 of the time,
+ * so requiring it turns "looks card-shaped" into "is almost certainly a
+ * card number", which is what keeps this check quiet enough to stay on.
+ */
+export function luhnValid(digits: string): boolean {
+  let sum = 0;
+  let alt = false;
+  for (let i = digits.length - 1; i >= 0; i--) {
+    let d = digits.charCodeAt(i) - 48;
+    if (d < 0 || d > 9) return false;
+    if (alt) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    sum += d;
+    alt = !alt;
+  }
+  return sum % 10 === 0;
+}
+
+/**
+ * A structurally VALID US Social Security number, not merely nine digits
+ * in a `ddd-dd-dddd` shape. The SSA never issues an area of 000, 666, or
+ * 900–999, a group of 00, or a serial of 0000, so excluding those turns
+ * a shape that collides with dates and ids into one that is really an
+ * SSN. Hyphens are required — a bare nine-digit run is far too common
+ * (timestamps, ids) to flag.
+ */
+function validSsn(area: string, group: string, serial: string): boolean {
+  const a = Number(area);
+  if (a === 0 || a === 666 || a >= 900) return false;
+  if (Number(group) === 0) return false;
+  if (Number(serial) === 0) return false;
+  return true;
+}
+
+const SSN_RE = /\b(\d{3})-(\d{2})-(\d{4})\b/;
+// 13–19 digits, optionally split by single spaces or hyphens — the way a
+// card is actually written. Bounded so it cannot match across a whole
+// line of numbers.
+const CARD_RE = /\b(?:\d[ -]?){12,18}\d\b/;
+
+/**
+ * Personal data that has no business in a published artifact. Kept to
+ * the two shapes that survive a strict validity test — a Luhn-valid card
+ * number and a structurally-valid SSN — for the same reason the secrets
+ * check sticks to issuer prefixes: a privacy scanner that flags every
+ * phone-shaped version string gets muted, and then it guards nothing.
+ * Emails and phone numbers are deliberately NOT matched — an author
+ * contact in a manifest is legitimate, and a version like 1.800.555 is
+ * not a phone number.
+ */
+export const noExposedPii = defineCheck({
+  id: "no-exposed-pii",
+  version: "1.0.0",
+  title: "No personal data in file contents",
+  category: "safety",
+  axis: "safety",
+  determinism: "deterministic",
+  weight: 3,
+  spec: checkSpecUrl("no-exposed-pii"),
+  inspects:
+    "The contents of every text file, for a Luhn-valid payment card number or a structurally-valid US SSN.",
+  rationale:
+    "Personal data shipped inside an artifact is disclosed to everyone who installs it, and reaches git history and mirrors the moment it is published. Detection is confined to shapes that pass a validity test — Luhn for a card, the SSA's issuance rules for an SSN — so a version string or an id is not mistaken for someone's private data. As with secrets, the report never quotes the matched value.",
+  examples: {
+    passing: "Contact support@example.com for help.",
+    failing: 'const card = "4111 1111 1111 1111";',
+  },
+  async run(ctx): Promise<CheckResult> {
+    const { hits, scanned } = await scanFiles(ctx, (line, path) => {
+      if (EXAMPLE_FILE.test(path)) return null;
+      // Case-insensitive, and richer than the secrets check's line filter:
+      // a line that calls itself a fake/example/sample/dummy is documenting
+      // a shape, not leaking someone's data — and the universal test card
+      // 4111 1111 1111 1111 lives in exactly such lines.
+      if (isPlaceholder(line)) return null;
+      const ssn = SSN_RE.exec(line);
+      if (ssn && validSsn(ssn[1]!, ssn[2]!, ssn[3]!)) return "US Social Security number";
+      const card = CARD_RE.exec(line);
+      if (card) {
+        const digits = card[0].replace(/[ -]/g, "");
+        if (digits.length >= 13 && digits.length <= 19 && luhnValid(digits)) {
+          return "payment card number";
+        }
+      }
+      return null;
+    });
+
+    if (scanned === 0) {
+      return { status: "neutral", summary: "No readable text files to scan." };
+    }
+    if (hits.length === 0) {
+      return { status: "pass", summary: `No personal data found in ${scanned} files.` };
+    }
+    const kinds = [...new Set(hits.map((h) => h.what))];
+    return {
+      status: "warn",
+      summary: `${hits.length} item${hits.length === 1 ? "" : "s"} of personal data found in file contents.`,
+      // Path and line only — quoting a card number or SSN would republish
+      // the very data the check exists to keep out of the report.
+      detail: `${hits
+        .slice(0, 20)
+        .map((h) => `- \`${h.path}:${h.line}\` — ${h.what}`)
+        .join("\n")}\n\nFound: ${kinds.join(", ")}. The values are deliberately not shown.`,
+      remediation:
+        "Remove the personal data and, if it was real, treat it as disclosed. If a sample is genuinely needed, put a clearly-labelled placeholder in an example file (name it *.example) so it is recognized as documentation, not data.",
+      evidence: evidenceFor(hits),
+    };
+  },
+});
+
 export const CONTENT_CHECKS = [
   noHardcodedSecrets,
   noHiddenUnicode,
   noInstructionInjection,
   noEscapingSymlinks,
+  noExposedPii,
 ];

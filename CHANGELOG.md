@@ -4,6 +4,59 @@ All notable changes to `@metahub-ai/assay` are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html); while on
 `0.x`, minor versions may carry breaking changes.
 
+## [0.2.5] — 2026-08-21
+
+The SkillEvaluator-alignment release: bring Assay's skill grading to parity
+with NVIDIA SkillEvaluator on the axes that belong in a single-artifact,
+offline evaluator, and be explicit about the two that do not.
+
+### Added
+
+- **Five-dimension skill scorecard**, aligned with NVIDIA SkillEvaluator so a
+  skill's result can be read against theirs like for like:
+  **correctness · discoverability · effectiveness · efficiency · security**,
+  each 0–10. Four of the five are a projection of signals Assay already
+  computes (the judge's `correctness`, `instruction_adherence`, `latency`, and
+  `safety`); the scorecard is surfaced as `result.scorecard`, as
+  `skill_*` report metrics, and as a one-line summary. Skill-only.
+- **Discoverability judgement.** A dedicated, skill-only judge dimension asking
+  whether the skill activated APPROPRIATELY for a task — engaging a relevant one
+  and staying out of an irrelevant one. Requested only for a skill's
+  non-adversarial cases, so every other kind's four-dimension verdict is
+  unchanged.
+- **Case taxonomy.** Cases now carry an optional `caseType` —
+  `explicit | implicit | contextual | negative` — matching SkillEvaluator's
+  dataset shape. Synthesis produces a labelled spread for skills including at
+  least one out-of-scope `negative` case, which is what makes discoverability a
+  precision measure and not merely a recall one. Author-supplied `evals.json`
+  may set `caseType` too.
+- **Uplift is ON by default for skills.** The with/without "Skill Lift"
+  measurement (previously opt-in via `--uplift`) now runs by default for the one
+  kind it applies to, feeding the scorecard's effectiveness read; waive it with
+  `--no-uplift`. Its delta is carried on the scorecard as `lift`.
+- **`no-exposed-pii` check** (all kinds). Flags personal data shipped inside an
+  artifact, confined to shapes that pass a validity test — a Luhn-valid payment
+  card number and a structurally-valid US SSN — so a version string or an id is
+  never mistaken for private data. Emails and phone numbers are deliberately not
+  matched (an author contact is legitimate). As with secrets, the report never
+  quotes the matched value. Closes the PII gap vs SkillEvaluator's Tier 1.
+- **`skill-distinctiveness` check** (skill-only). Flags whole paragraphs of
+  guidance repeated verbatim in a SKILL.md — context the model re-reads and the
+  buyer re-pays for on every trigger. This is the single-artifact half of
+  SkillEvaluator's Tier 2 distinctiveness check. Total checks: 54 → 56.
+
+### Notes
+
+- Negative cases stay in the normal score basis (they are not adversarial
+  attacks) but are excluded from the uplift computation, where both arms
+  correctly do nothing and the delta is only noise.
+- Two SkillEvaluator capabilities are deliberately NOT built into Assay because
+  they do not belong in a single-artifact, offline evaluator: **cross-catalog
+  dedup** and a **public leaderboard** are properties of the whole catalog and
+  belong to the registry; a **multiple-agent-runner matrix** (Claude Code +
+  Codex CLIs) is a large separate effort whose marginal signal is small
+  (SkillEvaluator's own data: ~5-point harness variance vs +2 to +46 per skill).
+
 ## [0.2.4] — 2026-08-13
 
 ### Fixed
@@ -119,6 +172,7 @@ requested.
   "0.2"/"0.5" milestone codenames used during development are not version
   numbers. The project remains well short of the `1.0` maturity milestone.
 
+[0.2.5]: https://github.com/metahub-ai/assay/releases/tag/v0.2.5
 [0.2.4]: https://github.com/metahub-ai/assay/releases/tag/v0.2.4
 [0.2.3]: https://github.com/metahub-ai/assay/releases/tag/v0.2.3
 [0.2.2]: https://github.com/metahub-ai/assay/releases/tag/v0.2.2
