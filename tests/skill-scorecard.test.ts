@@ -20,7 +20,10 @@ const verdict = (over: Partial<JudgeVerdict> = {}): JudgeVerdict => ({
   ...over,
 });
 
-const result = (v: JudgeVerdict, test: Partial<BehavioralTestResult["test"]> = {}): BehavioralTestResult => ({
+const result = (
+  v: JudgeVerdict,
+  test: Partial<BehavioralTestResult["test"]> = {},
+): BehavioralTestResult => ({
   test: { id: "t", prompt: "p", ...test },
   transcript: { messages: [], toolCalls: [], durationMs: 1 },
   verdict: v,
@@ -30,7 +33,12 @@ describe("computeSkillScorecard", () => {
   it("projects the five named dimensions from existing signals", () => {
     const sc = computeSkillScorecard([
       result(verdict({ discoverability: 6 })),
-      result(verdict({ discoverability: 8, scores: { correctness: 6, instruction_adherence: 9, safety: 10, latency: 7 } })),
+      result(
+        verdict({
+          discoverability: 8,
+          scores: { correctness: 6, instruction_adherence: 9, safety: 10, latency: 7 },
+        }),
+      ),
     ]);
     expect(sc).toBeDefined();
     expect(sc!.correctness).toBe(7); // (8+6)/2
@@ -54,8 +62,20 @@ describe("computeSkillScorecard", () => {
   it("excludes adversarial probes and judge outages from the basis", () => {
     const sc = computeSkillScorecard([
       result(verdict({ discoverability: 6 })),
-      result(verdict({ discoverability: 0, scores: { correctness: 0, instruction_adherence: 0, safety: 0, latency: 0 } }), { adversarial: true }),
-      result(verdict({ judgeFailed: true, discoverability: 0, scores: { correctness: 0, instruction_adherence: 0, safety: 0, latency: 0 } })),
+      result(
+        verdict({
+          discoverability: 0,
+          scores: { correctness: 0, instruction_adherence: 0, safety: 0, latency: 0 },
+        }),
+        { adversarial: true },
+      ),
+      result(
+        verdict({
+          judgeFailed: true,
+          discoverability: 0,
+          scores: { correctness: 0, instruction_adherence: 0, safety: 0, latency: 0 },
+        }),
+      ),
     ]);
     // Only the single normal, judged case counts.
     expect(sc!.basis).toBe(1);
@@ -69,9 +89,7 @@ describe("computeSkillScorecard", () => {
 
   it("returns undefined when there is no normal case to score", () => {
     expect(computeSkillScorecard([])).toBeUndefined();
-    expect(
-      computeSkillScorecard([result(verdict(), { adversarial: true })]),
-    ).toBeUndefined();
+    expect(computeSkillScorecard([result(verdict(), { adversarial: true })])).toBeUndefined();
   });
 });
 
@@ -187,8 +205,18 @@ describe("skill scorecard flows through runBehavioralEval end to end", () => {
 
       if (text.includes("synthesize test cases")) {
         const cases = [
-          { id: "explicit-1", prompt: "Format this text as a table.", expect: "a table", caseType: "explicit" },
-          { id: "negative-1", prompt: "What's the capital of France?", expect: "answers plainly without the skill", caseType: "negative" },
+          {
+            id: "explicit-1",
+            prompt: "Format this text as a table.",
+            expect: "a table",
+            caseType: "explicit",
+          },
+          {
+            id: "negative-1",
+            prompt: "What's the capital of France?",
+            expect: "answers plainly without the skill",
+            caseType: "negative",
+          },
         ];
         return { text: JSON.stringify(cases), toolCalls: [], stopReason: "end", usage };
       }
@@ -221,7 +249,13 @@ describe("skill scorecard flows through runBehavioralEval end to end", () => {
     expect(r.error).toBeUndefined();
     expect(r.scorecard).toBeDefined();
     const sc = r.scorecard!;
-    for (const k of ["correctness", "discoverability", "effectiveness", "efficiency", "security"] as const) {
+    for (const k of [
+      "correctness",
+      "discoverability",
+      "effectiveness",
+      "efficiency",
+      "security",
+    ] as const) {
       expect(typeof sc[k]).toBe("number");
       expect(sc[k]).toBeGreaterThanOrEqual(0);
       expect(sc[k]).toBeLessThanOrEqual(10);

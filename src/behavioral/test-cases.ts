@@ -140,7 +140,7 @@ async function synthesizeCases(input: LoadTestCasesInput): Promise<EvalTestCase[
         "  - negative: an UNRELATED, out-of-scope task the skill should NOT handle.",
         "Include at LEAST one negative case. For a negative case, `expect` should say the",
         "assistant recognizes the skill does not apply and does not force its workflow.",
-        'Respond with ONLY a JSON array of {id, prompt, expect, caseType} objects.',
+        "Respond with ONLY a JSON array of {id, prompt, expect, caseType} objects.",
       ].join("\n")
     : [
         "Synthesize test cases for a behavioral evaluation.",
