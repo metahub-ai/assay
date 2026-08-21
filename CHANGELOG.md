@@ -121,7 +121,7 @@ Fixes the runtime network ledger on the local (podman) and E2B sandboxes.
 ## [0.2.0] — 2026-08-09
 
 The runtime-ledger + hardened-probes milestone. `0.1.x` graded an artifact from
-its source; `0.2.0` also watches what it *does* when run, verifies MCP servers
+its source; `0.2.0` also watches what it _does_ when run, verifies MCP servers
 against the protocol, and roughly triples both the static check set and the
 adversarial probe corpus. Static grading remains zero-dependency and offline;
 the new runtime evidence is gathered in a sandbox only when a behavioral run is
@@ -130,8 +130,8 @@ requested.
 ### Added
 
 - **Runtime behavior ledger.** A sandboxed run now records network connections,
-  DNS, file access, and spawned commands (pcap + strace) and diffs *declared*
-  against *observed* behavior, so an artifact that reaches an undeclared host or
+  DNS, file access, and spawned commands (pcap + strace) and diffs _declared_
+  against _observed_ behavior, so an artifact that reaches an undeclared host or
   touches a sensitive file is surfaced as evidence, not opinion. Works on podman
   as well as Docker; the packet ledger understands IPv6.
 - **MCP protocol depth.** The harness captures the full MCP protocol surface

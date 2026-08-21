@@ -477,8 +477,7 @@ export async function runBehavioralEval(raw: RunBehavioralInput): Promise<Behavi
     // The five-dimension scorecard — a projection of this run's signals
     // onto SkillEvaluator's named axes, so the two are directly
     // comparable. Skill-only; `undefined` when there was no normal case.
-    const scorecard =
-      input.kind === "skill" ? computeSkillScorecard(tests, uplift) : undefined;
+    const scorecard = input.kind === "skill" ? computeSkillScorecard(tests, uplift) : undefined;
 
     const observedSurface = tests.find((t) => t.transcript.observedSurface)?.transcript
       .observedSurface;

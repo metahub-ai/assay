@@ -166,7 +166,8 @@ describe("skill-frontmatter-depth", () => {
 
 describe("findDuplicatedGuidance", () => {
   it("detects a verbatim-repeated substantial paragraph", () => {
-    const p = "Always validate the user input before writing any file to the target directory carefully.";
+    const p =
+      "Always validate the user input before writing any file to the target directory carefully.";
     const { blocks, redundantPct } = findDuplicatedGuidance(`${p}\n\n## Later\n\n${p}`);
     expect(blocks).toHaveLength(1);
     expect(blocks[0]!.count).toBe(2);
@@ -189,14 +190,16 @@ describe("skill-distinctiveness", () => {
   const mkDoc = (body: string) => `---\nname: d\ndescription: Does a thing\n---\n${body}`;
 
   it("warns when a whole paragraph of guidance is pasted twice", async () => {
-    const p = "Always validate the user input before writing any file to the target directory carefully.";
+    const p =
+      "Always validate the user input before writing any file to the target directory carefully.";
     const r = await run(skillDistinctiveness, { "SKILL.md": mkDoc(`${p}\n\n## Again\n\n${p}`) });
     expect(r.status).toBe("warn");
     expect(r.summary).toMatch(/redundant/);
   });
 
   it("passes a skill whose sections each say something new", async () => {
-    const body = "First, read the input.\n\nNext, transform it into the target shape.\n\nFinally, write the result and report what changed.";
+    const body =
+      "First, read the input.\n\nNext, transform it into the target shape.\n\nFinally, write the result and report what changed.";
     const r = await run(skillDistinctiveness, { "SKILL.md": mkDoc(body) });
     expect(r.status).toBe("pass");
   });

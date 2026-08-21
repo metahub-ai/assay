@@ -444,7 +444,9 @@ describe("analyzeLedger", () => {
     ).toBe(true);
     // ...but not on E2B, where it fires on every run from infra, not the artifact.
     expect(
-      analyzeLedger(ledgerWith(conns), { sandbox: "e2b" }).flags.some((f) => f.includes("metadata")),
+      analyzeLedger(ledgerWith(conns), { sandbox: "e2b" }).flags.some((f) =>
+        f.includes("metadata"),
+      ),
     ).toBe(false);
   });
 

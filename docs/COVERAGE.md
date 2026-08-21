@@ -90,12 +90,12 @@ piece, and it is listed in §6.
 
 ## 2. Coverage by axis
 
-| Axis          | Checks | Notes                                                                                                   |
-| ------------- | ------ | ------------------------------------------------------------------------------------------------------- |
-| **integrity** | 14     | Manifest, identity, entry resolution, per-kind well-formedness                                                          |
+| Axis          | Checks | Notes                                                                                                                                    |
+| ------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| **integrity** | 14     | Manifest, identity, entry resolution, per-kind well-formedness                                                                           |
 | **safety**    | 26     | Credential leaks, undeclared egress, obfuscation, injection/tool-poisoning, hostile instructions, plugin hooks, auth posture, typosquats |
-| **care**      | 14     | Description quality, docs, body substance, token cost, maintenance signals                                              |
-| **behavior**  | 1      | The behavioral engine, via `createBehavioralCheck`                                                                      |
+| **care**      | 14     | Description quality, docs, body substance, token cost, maintenance signals                                                               |
+| **behavior**  | 1      | The behavioral engine, via `createBehavioralCheck`                                                                                       |
 
 All four axes now produce real verdicts. Note that `behavior` is a single
 _check_ backed by an entire engine — four kind-specific harnesses (stdio AND
