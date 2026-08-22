@@ -56,6 +56,11 @@ const CANDIDATES: Candidate[] = [
     load: async () => (await import("./adapters/openrouter.js")).registerOpenRouterIfConfigured(),
   },
   {
+    name: "nvidia",
+    env: "NVIDIA_API_KEY",
+    load: async () => (await import("./adapters/nvidia.js")).registerNvidiaIfConfigured(),
+  },
+  {
     name: "local",
     // Opt-in rather than always-on: the local adapter self-registers on
     // import and would otherwise silently win auto-detection on a

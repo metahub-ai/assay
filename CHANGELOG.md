@@ -4,6 +4,21 @@ All notable changes to `@metahub-ai/assay` are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html); while on
 `0.x`, minor versions may carry breaking changes.
 
+## [Unreleased]
+
+### Added
+
+- **NVIDIA API Catalog provider** (`--provider nvidia`). NVIDIA's
+  build.nvidia.com hosts 100+ foundation models (Llama, Nemotron,
+  DeepSeek, Qwen, Mistral, GLM, …) behind a single OpenAI-compatible
+  endpoint reached with a free-tier `nvapi-` key, so it drops in as a
+  first-class provider alongside anthropic/openai/openrouter/local.
+  Configure with `NVIDIA_API_KEY`; pin models with `NVIDIA_JUDGE_MODEL`
+  / `NVIDIA_DRIVER_MODEL` (defaults: `meta/llama-3.3-70b-instruct` for
+  the judge, `meta/llama-3.1-8b-instruct` for the driver — set the exact
+  ids from each model's card). Base URL and key are resolved per call,
+  so changing the env takes effect on the next run.
+
 ## [0.2.5] — 2026-08-21
 
 The SkillEvaluator-alignment release: bring Assay's skill grading to parity

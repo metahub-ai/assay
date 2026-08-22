@@ -28,6 +28,11 @@ const PROVIDER_ENV = [
   "ANTHROPIC_API_KEY",
   "OPENAI_API_KEY",
   "OPENROUTER_API_KEY",
+  "NVIDIA_API_KEY",
+  "NVIDIA_BASE_URL",
+  "NVIDIA_JUDGE_MODEL",
+  "NVIDIA_DRIVER_MODEL",
+  "NVIDIA_MODEL",
   "LOCAL_LLM_BASE_URL",
 ] as const;
 const saved: Record<string, string | undefined> = {};
@@ -130,6 +135,45 @@ describe("resolveLlmProvider", () => {
   it("rejects an unknown provider name", async () => {
     clearProviderEnv();
     await expect(resolveLlmProvider("nope")).rejects.toThrow(/Unknown provider/);
+  });
+
+  // NVIDIA's API Catalog — an OpenAI-compatible endpoint reached with a
+  // free `nvapi-` key. Same wiring as OpenRouter, different base URL.
+  it("resolves the nvidia provider with separate judge/driver defaults", async () => {
+    clearProviderEnv();
+    process.env["NVIDIA_API_KEY"] = "nvapi-test";
+    const { provider, configured } = await resolveLlmProvider("nvidia");
+    expect(provider.name).toBe("nvidia");
+    expect(configured).toContain("nvidia");
+    // Distinct models per role, pinned to catalog ids by default.
+    expect(provider.modelFor!("judge")).toMatch(/llama-3\.3/);
+    expect(provider.modelFor!("driver")).toMatch(/llama-3\.1/);
+  });
+
+  it("says to set NVIDIA_API_KEY when nvidia is asked for but unset", async () => {
+    clearProviderEnv();
+    await expect(resolveLlmProvider("nvidia")).rejects.toThrow(/Set NVIDIA_API_KEY/);
+  });
+
+  it("auto-detects nvidia when it is the only provider configured", async () => {
+    clearProviderEnv();
+    process.env["NVIDIA_API_KEY"] = "nvapi-test";
+    expect((await resolveLlmProvider()).provider.name).toBe("nvidia");
+  });
+
+  // Round-trips a completion through the NVIDIA base URL (pointed at the
+  // local fake), proving the adapter speaks the OpenAI-compatible shape.
+  it("routes a completion through the NVIDIA base URL", async () => {
+    clearProviderEnv();
+    process.env["NVIDIA_API_KEY"] = "nvapi-test";
+    process.env["NVIDIA_BASE_URL"] = `http://localhost:${PORT}/v1`;
+    judgeAgrees = true;
+    const { provider } = await resolveLlmProvider("nvidia");
+    const res = await provider.complete({
+      messages: [{ role: "user", content: "hi" }],
+      role: "driver",
+    });
+    expect(res.text).toContain('"pass"');
   });
 });
 
