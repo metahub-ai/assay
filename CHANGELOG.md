@@ -4,7 +4,7 @@ All notable changes to `@metahub-ai/assay` are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html); while on
 `0.x`, minor versions may carry breaking changes.
 
-## [Unreleased]
+## [0.2.6] — 2026-08-21
 
 ### Added
 
@@ -187,6 +187,7 @@ requested.
   "0.2"/"0.5" milestone codenames used during development are not version
   numbers. The project remains well short of the `1.0` maturity milestone.
 
+[0.2.6]: https://github.com/metahub-ai/assay/releases/tag/v0.2.6
 [0.2.5]: https://github.com/metahub-ai/assay/releases/tag/v0.2.5
 [0.2.4]: https://github.com/metahub-ai/assay/releases/tag/v0.2.4
 [0.2.3]: https://github.com/metahub-ai/assay/releases/tag/v0.2.3
