@@ -321,7 +321,7 @@ BEHAVIORAL OPTIONS (on by default once configured — costs money and time)
 
   --behavioral         force it on, including in CI
   --no-behavioral      skip it, however this machine is configured
-  --provider <name>    anthropic | openai | openrouter | local
+  --provider <name>    anthropic | openai | openrouter | nvidia | local
   --sandbox <name>     docker | podman (local, free) | e2b (cloud, needs a key)
   --transcripts <dir>  record transcripts here so the verdict can be replayed
   --cases <n>          how many cases to synthesize (default 5)
@@ -343,7 +343,7 @@ BEHAVIORAL OPTIONS (on by default once configured — costs money and time)
 
 REPLAY OPTIONS
   --transcripts <dir>  directory of stored transcripts (required)
-  --provider <name>    anthropic | openai | openrouter | local
+  --provider <name>    anthropic | openai | openrouter | nvidia | local
                        auto-detected when exactly one is configured
 
 VERIFY OPTIONS
