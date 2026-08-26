@@ -1,0 +1,30 @@
+cff-version: 1.2.0
+title: "Assay: an open, reproducible framework for evaluating AI artifacts"
+message: >-
+  If you use this software in academic work, please cite it using
+  the metadata below.
+type: software
+authors:
+  - name: "TheRandomDev9"
+repository-code: "https://github.com/metahub-ai/assay"
+url: "https://github.com/metahub-ai/assay"
+abstract: >-
+  Assay evaluates AI artifacts — skills, MCP servers, agents and plugins —
+  in two tiers. A static tier of deterministic checks reads the artifact's
+  manifest, documentation and file contents. An opt-in behavioral tier runs
+  the artifact inside a sandbox, driven by one model and graded by another,
+  with a deterministic safety scan over the captured commands. Every check
+  declares a determinism tier, every score reports its own coverage, and
+  every transcript is recorded so a verdict can be re-derived by someone who
+  does not trust the party that produced it.
+keywords:
+  - AI safety
+  - software supply chain
+  - Model Context Protocol
+  - agent skills
+  - LLM-as-judge
+  - reproducibility
+  - static analysis
+  - dynamic analysis
+license: Apache-2.0
+version: 0.2.4
