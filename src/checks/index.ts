@@ -13,6 +13,7 @@ import { DOCUMENTATION_CHECKS } from "./documentation.js";
 import { SUPPLY_CHAIN_CHECKS } from "./supply-chain.js";
 import { CONTENT_CHECKS } from "./content.js";
 import { CODE_CHECKS } from "./code.js";
+import { DESTRUCTIVE_SCOPE_CHECKS } from "./destructive-scope.js";
 import { SKILL_CHECKS } from "./kinds/skill.js";
 import { SKILL_SAFETY_CHECKS } from "./kinds/skill-safety.js";
 import { MCP_CHECKS } from "./kinds/mcp.js";
@@ -28,6 +29,7 @@ export { INTEGRITY_CHECKS } from "./integrity.js";
 export { DOCUMENTATION_CHECKS } from "./documentation.js";
 export { SUPPLY_CHAIN_CHECKS } from "./supply-chain.js";
 export { CODE_CHECKS } from "./code.js";
+export { DESTRUCTIVE_SCOPE_CHECKS } from "./destructive-scope.js";
 export { SKILL_CHECKS } from "./kinds/skill.js";
 export { SKILL_SAFETY_CHECKS } from "./kinds/skill-safety.js";
 export { MCP_CHECKS } from "./kinds/mcp.js";
@@ -49,6 +51,7 @@ export const DEFAULT_CHECKS: readonly CheckDefinition[] = [
   ...SUPPLY_CHAIN_CHECKS,
   ...CONTENT_CHECKS,
   ...CODE_CHECKS,
+  ...DESTRUCTIVE_SCOPE_CHECKS,
   ...SKILL_CHECKS,
   ...SKILL_SAFETY_CHECKS,
   ...MCP_CHECKS,
